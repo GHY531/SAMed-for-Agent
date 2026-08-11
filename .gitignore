@@ -127,3 +127,60 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+*.onnx
+checkpoints/
+Lora_checkpoints/
+Lora_checkopints/
+
+# Training and evaluation outputs
+output/
+outputs/
+TestResult/
+test_result/
+results/
+runs/
+logs/
+tensorboard/
+
+# Medical datasets
+data/
+dataset/
+PanTS/
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.h5
+*.hdf5
+
+# Local environments and editor settings
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+
+# Temporary files
+*.log
+*.tmp
+*.swp
+
+# Secrets
+.env
+.env.*
+
+# TensorBoard event files
+events.out.tfevents.*
+
+# Visualization outputs
+Visualize/Bad_Data_GT/
+Visualize/VisualizedGT/

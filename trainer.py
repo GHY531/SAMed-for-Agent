@@ -1,34 +1,35 @@
-import argparse
 import logging
 import os
 import random
 import sys
-import time
-import math
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 from tqdm import tqdm
-from utils import DiceLoss, Focal_loss
+from utils import DiceLoss, Focal_loss, WeightedDiceLoss
 from torchvision import transforms
-from icecream import ic
+from datasets.direct_dataset import DirectDataset, RandomGenerator
 
+dice_weights_list = [0.2, 3, 0.5, 1.5, 1.5]
+focal_weights_list = [0.05, 10, 0.5, 1.5, 1.5]
 
-def calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, dice_weight:float=0.8):
+def calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, focal_loss,
+            ce_weight:float=0.1,
+            dice_weight:float=0.45,
+            focal_weight:float=0.45
+            ):
     low_res_logits = outputs['low_res_logits']
     loss_ce = ce_loss(low_res_logits, low_res_label_batch[:].long())
     loss_dice = dice_loss(low_res_logits, low_res_label_batch, softmax=True)
-    loss = (1 - dice_weight) * loss_ce + dice_weight * loss_dice
-    return loss, loss_ce, loss_dice
+    loss_focal = focal_loss(low_res_logits, low_res_label_batch)
+    loss = ce_weight * loss_ce + dice_weight * loss_dice + focal_weight * loss_focal
+    return loss, loss_ce, loss_dice, loss_focal
 
 
 def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
-    from datasets.dataset_synapse import Synapse_dataset, RandomGenerator
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
                         format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
@@ -37,7 +38,9 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     num_classes = args.num_classes
     batch_size = args.batch_size * args.n_gpu
     # max_iterations = args.max_iterations
-    db_train = Synapse_dataset(base_dir=args.root_path, list_dir=args.list_dir, split="train",
+    train_list_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/train.txt'
+    #train_list_path could be your own path to your train_list
+    db_train = DirectDataset(label_path = train_list_path,
                                transform=transforms.Compose(
                                    [RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res])]))
     print("The length of train set is: {}".format(len(db_train)))
@@ -50,8 +53,11 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
     model.train()
+
+    dice_class_weights = torch.tensor(dice_weights_list, dtype=torch.float32).cuda()
     ce_loss = CrossEntropyLoss()
-    dice_loss = DiceLoss(num_classes + 1)
+    dice_loss = WeightedDiceLoss(n_classes=num_classes + 1, weight=dice_class_weights)
+    focal_loss = Focal_loss(num_classes=num_classes + 1, alpha=focal_weights_list)
     if args.warmup:
         b_lr = base_lr / args.warmup_period
     else:
@@ -66,9 +72,12 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     stop_epoch = args.stop_epoch
     max_iterations = args.max_epochs * len(trainloader)  # max_epoch = max_iterations // len(trainloader) + 1
     logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
-    best_performance = 0.0
+    best_performance = float('inf')
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
+        epoch_dice_sum = 0.0
+        epoch_focal_sum = 0.0
+        epoch_batch_count = 0
         for i_batch, sampled_batch in enumerate(trainloader):
             image_batch, label_batch = sampled_batch['image'], sampled_batch['label']  # [b, c, h, w], [b, h, w]
             low_res_label_batch = sampled_batch['low_res_label']
@@ -76,7 +85,11 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
             low_res_label_batch = low_res_label_batch.cuda()
             assert image_batch.max() <= 3, f'image_batch max: {image_batch.max()}'
             outputs = model(image_batch, multimask_output, args.img_size)
-            loss, loss_ce, loss_dice = calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, args.dice_param)
+            loss, loss_ce, loss_dice, loss_focal = calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, focal_loss, 
+            ce_weight = args.ce_weight, 
+            dice_weight = args.dice_weight, 
+            focal_weight = args.focal_weight
+            )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -95,39 +108,53 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
                     param_group['lr'] = lr_
 
             iter_num = iter_num + 1
-            writer.add_scalar('info/lr', lr_, iter_num)
-            writer.add_scalar('info/total_loss', loss, iter_num)
-            writer.add_scalar('info/loss_ce', loss_ce, iter_num)
-            writer.add_scalar('info/loss_dice', loss_dice, iter_num)
+            writer.add_scalar('learning_rate', lr_, iter_num)
+            writer.add_scalar('Total_loss', loss, iter_num)
+            writer.add_scalar('Loss_ce', loss_ce, iter_num)
+            writer.add_scalar('Loss_dice', loss_dice, iter_num)
+            writer.add_scalar('Loss_focal', loss_focal, iter_num)
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f' % (iter_num, loss.item(), loss_ce.item(), loss_dice.item()))
+            print('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, loss_focal: %f' % (
+                iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_focal.item()))
+            
+            if iter_num % 50 == 0:
+                logging.info('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, loss_focal: %f' % (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_focal.item()))
+            
+            epoch_dice_sum += loss_dice.item()
+            epoch_focal_sum += loss_focal.item()
+            epoch_batch_count += 1
 
-            if iter_num % 20 == 0:
-                image = image_batch[1, 0:1, :, :]
-                image = (image - image.min()) / (image.max() - image.min())
-                writer.add_image('train/Image', image, iter_num)
-                output_masks = outputs['masks']
-                output_masks = torch.argmax(torch.softmax(output_masks, dim=1), dim=1, keepdim=True)
-                writer.add_image('train/Prediction', output_masks[1, ...] * 50, iter_num)
-                labs = label_batch[1, ...].unsqueeze(0) * 50
-                writer.add_image('train/GroundTruth', labs, iter_num)
+            if iter_num % args.save_iteration == 0:
+                iter_save_path = os.path.join(snapshot_path, f'epoch_{epoch_num}_iter_{iter_num}.pth')
+                try:
+                    model.save_lora_parameters(iter_save_path)
+                except AttributeError:
+                    model.module.save_lora_parameters(iter_save_path)
+                logging.info(f"Saved LoRA weights at iteration {iter_num} to {iter_save_path}")
 
-        save_interval = 20 # int(max_epoch/6)
-        if (epoch_num + 1) % save_interval == 0:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
+        #save the best and last epoch
+        epoch_avg_dice = epoch_dice_sum / max(epoch_batch_count, 1)
+        epoch_avg_focal = epoch_focal_sum / max(epoch_batch_count, 1)
+        epoch_avg_loss = 0.7 * epoch_avg_dice + 0.3 * epoch_avg_focal
+
+        logging.info("epoch %d : avg loss_dice: %f, ave loss_focal: %f" % (epoch_num, epoch_avg_dice, epoch_avg_focal))
+        if epoch_avg_loss < best_performance:
+            best_performance = epoch_avg_loss
+            best_save_path = os.path.join(snapshot_path, 'best.pth')
             try:
-                model.save_lora_parameters(save_mode_path)
+                model.save_lora_parameters(best_save_path)
             except:
-                model.module.save_lora_parameters(save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
+                model.module.save_lora_parameters(best_save_path)
+            logging.info("new best epoch %d (avg loss_dice %f), save model to %s"
+                         % (epoch_num, best_performance, best_save_path))
 
         if epoch_num >= max_epoch - 1 or epoch_num >= stop_epoch - 1:
-            save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
+            last_save_path = os.path.join(snapshot_path, 'last.pth')
             try:
-                model.save_lora_parameters(save_mode_path)
+                model.save_lora_parameters(last_save_path)
             except:
-                model.module.save_lora_parameters(save_mode_path)
-            logging.info("save model to {}".format(save_mode_path))
+                model.module.save_lora_parameters(last_save_path)
+            logging.info("save last epoch model to {}".format(last_save_path))
             iterator.close()
             break
 

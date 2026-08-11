@@ -6,9 +6,7 @@ from scipy.ndimage import zoom
 import torch.nn as nn
 import SimpleITK as sitk
 import torch.nn.functional as F
-import imageio
 from einops import repeat
-from icecream import ic
 
 
 class Focal_loss(nn.Module):
@@ -57,6 +55,69 @@ class Focal_loss(nn.Module):
             loss = loss.sum()
         return loss
 
+class WeightedDiceLoss(nn.Module):
+    def __init__(self, n_classes, weight=None):
+        super(WeightedDiceLoss, self).__init__()
+        self.n_classes = n_classes
+        # Convert weight to buffer if provided at init
+        if weight is not None:
+            if not isinstance(weight, torch.Tensor):
+                weight = torch.tensor(weight, dtype=torch.float32)
+            self.register_buffer("weight", weight)
+        else:
+            self.weight = None
+
+    def _one_hot_encoder(self, input_tensor):
+        # Squeeze channel dim if target shape is (B, 1, H, W)
+        if input_tensor.dim() == 4 and input_tensor.size(1) == 1:
+            input_tensor = input_tensor.squeeze(1)
+
+        # F.one_hot expects long dtype: (B, H, W) -> (B, H, W, C) -> (B, C, H, W)
+        one_hot = F.one_hot(input_tensor.long(), num_classes=self.n_classes)
+        return one_hot.permute(0, 3, 1, 2).float()
+
+    def _dice_loss(self, score, target):
+        target = target.float()
+        smooth = 1e-5
+        intersect = torch.sum(score * target)
+        y_sum = torch.sum(target * target)
+        z_sum = torch.sum(score * score)
+        loss = (2 * intersect + smooth) / (z_sum + y_sum + smooth)
+        return 1.0 - loss
+
+    def forward(self, inputs, target, weight=None, softmax=False):
+        if softmax:
+            inputs = torch.softmax(inputs, dim=1)
+
+        target = self._one_hot_encoder(target)
+
+        assert (
+            inputs.size() == target.size()
+        ), f"Predict {inputs.size()} & target {target.size()} shape do not match"
+
+        # Determine which weight array to use
+        if weight is None:
+            if self.weight is not None:
+                weight = self.weight
+            else:
+                weight = torch.ones(
+                    self.n_classes, device=inputs.device, dtype=torch.float32
+                )
+        else:
+            if not isinstance(weight, torch.Tensor):
+                weight = torch.tensor(
+                    weight, device=inputs.device, dtype=torch.float32
+                )
+            else:
+                weight = weight.to(inputs.device)
+
+        loss = 0.0
+        for i in range(self.n_classes):
+            dice_loss = self._dice_loss(inputs[:, i], target[:, i])
+            loss += dice_loss * weight[i]
+
+        # Normalize by the sum of weights instead of n_classes
+        return loss / torch.sum(weight)
 
 class DiceLoss(nn.Module):
     def __init__(self, n_classes):
@@ -101,15 +162,23 @@ class DiceLoss(nn.Module):
 def calculate_metric_percase(pred, gt):
     pred[pred > 0] = 1
     gt[gt > 0] = 1
-    if pred.sum() > 0 and gt.sum() > 0:
-        dice = metric.binary.dc(pred, gt)
-        hd95 = metric.binary.hd95(pred, gt)
-        return dice, hd95
-    elif pred.sum() > 0 and gt.sum() == 0:
-        return 1, 0
-    else:
-        return 0, 0
+    
+    pred_has_pixel = pred.sum() > 0
+    gt_has_pixel = gt.sum() > 0
 
+    if pred_has_pixel and gt_has_pixel:
+        dice = metric.binary.dc(pred, gt)
+        
+        intersection = np.logical_and(pred, gt).sum()
+        union = np.logical_or(pred, gt).sum()
+        iou = intersection / (union + 1e-8)
+        return dice, iou
+
+    elif not pred_has_pixel and not gt_has_pixel:
+        return 1.0, 1.0
+
+    else:
+        return 0.0, 0.0
 
 def test_single_volume(image, label, net, classes, multimask_output, patch_size=[256, 256], input_size=[224, 224],
                        test_save_path=None, case=None, z_spacing=1):
@@ -177,4 +246,71 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         sitk.WriteImage(prd_itk, test_save_path + '/' + case + "_pred.nii.gz")
         sitk.WriteImage(img_itk, test_save_path + '/' + case + "_img.nii.gz")
         sitk.WriteImage(lab_itk, test_save_path + '/' + case + "_gt.nii.gz")
+    return metric_list
+
+def test_single_slice(image, label, net, classes, multimask_output, patch_size=[256, 256], input_size=[224, 224],
+                      test_save_path=None, case=None):
+    # Squeeze batch and extra dimensions to ensure 2D shape (H, W)
+    if isinstance(image, torch.Tensor):
+        image = image.squeeze().cpu().detach().numpy()
+    else:
+        image = np.squeeze(image)
+        
+    if isinstance(label, torch.Tensor):
+        label = label.squeeze().cpu().detach().numpy()
+    else:
+        label = np.squeeze(label)
+
+    # Record original spatial dimensions
+    x, y = image.shape[0], image.shape[1]
+
+    # Resize slice to input_size and patch_size if needed
+    slice_img = image
+    if x != input_size[0] or y != input_size[1]:
+        slice_img = zoom(slice_img, (input_size[0] / x, input_size[1] / y), order=3)
+
+    new_x, new_y = slice_img.shape[0], slice_img.shape[1]
+    if new_x != patch_size[0] or new_y != patch_size[1]:
+        slice_img = zoom(slice_img, (patch_size[0] / new_x, patch_size[1] / new_y), order=3)
+
+    # Prepare network input tensor (1, 3, H, W)
+    inputs = torch.from_numpy(slice_img).unsqueeze(0).unsqueeze(0).float().cuda()
+    inputs = repeat(inputs, 'b c h w -> b (repeat c) h w', repeat=3)
+
+    # Model evaluation
+    net.eval()
+    with torch.no_grad():
+        outputs = net(inputs, multimask_output, patch_size[0])
+        output_masks = outputs['masks']
+        out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1).squeeze(0)
+        out = out.cpu().detach().numpy()
+
+        out_h, out_w = out.shape
+        # Restore prediction to original image resolution using nearest neighbor interpolation
+        if x != out_h or y != out_w:
+            prediction = zoom(out, (x / out_h, y / out_w), order=0)
+        else:
+            prediction = out
+
+    # Compute metric for each class
+    metric_list = []
+    for i in range(1, classes + 1):
+        metric_list.append(calculate_metric_percase(prediction == i, label == i))
+
+    # Save 2D slice files if path is provided
+    if test_save_path is not None:
+        os.makedirs(test_save_path, exist_ok=True)
+        img_itk = sitk.GetImageFromArray(image.astype(np.float32))
+        prd_itk = sitk.GetImageFromArray(prediction.astype(np.float32))
+        lab_itk = sitk.GetImageFromArray(label.astype(np.float32))
+        
+        # Set 2D image spacing
+        img_itk.SetSpacing((1.0, 1.0))
+        prd_itk.SetSpacing((1.0, 1.0))
+        lab_itk.SetSpacing((1.0, 1.0))
+        
+        sitk.WriteImage(prd_itk, os.path.join(test_save_path, f"{case}_pred.nii.gz"))
+        sitk.WriteImage(img_itk, os.path.join(test_save_path, f"{case}_img.nii.gz"))
+        sitk.WriteImage(lab_itk, os.path.join(test_save_path, f"{case}_gt.nii.gz"))
+
     return metric_list

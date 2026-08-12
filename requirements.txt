@@ -5,6 +5,7 @@ imageio==2.10.1
 MedPy==0.4.0
 nibabel==4.0.2
 monai==1.1.0
+matplotlib==3.5.3
 numpy==1.21.6
 opencv_python==4.5.4.58
 safetensors==0.3.1

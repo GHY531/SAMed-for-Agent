@@ -1,18 +1,21 @@
-import os
-import sys
-import random
-import logging
 import argparse
+import csv
+import logging
+import os
+import random
+import sys
+from importlib import import_module
+
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from importlib import import_module
 
-from utils import test_single_slice
-from segment_anything import sam_model_registry
 from datasets.test_2d_dataset import TestDataset
+from segment_anything import sam_model_registry
+from utils import test_single_slice
+
 
 class_to_name = {
     0: 'background',
@@ -25,8 +28,91 @@ class_to_name = {
 test_list = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/test'
 
 
+def save_tumour_area_statistics(records, output_dir):
+    """Save per-slice tumour areas and a distribution figure."""
+    csv_path = os.path.join(output_dir, 'tumour_area_per_slice.csv')
+    with open(csv_path, 'w', newline='', encoding='utf-8') as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=(
+                'case_name',
+                'tumour_pixels',
+                'tumour_area_fraction',
+                'tumour_dice',
+            ),
+        )
+        writer.writeheader()
+        writer.writerows(records)
+
+    # Use a non-interactive backend so plotting works on headless servers.
+    import matplotlib
+
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    tumour_areas = np.asarray(
+        [record['tumour_pixels'] for record in records], dtype=np.int64
+    )
+    positive_areas = tumour_areas[tumour_areas > 0]
+    area_groups = np.asarray(
+        [
+            np.count_nonzero(tumour_areas == 0),
+            np.count_nonzero((tumour_areas >= 1) & (tumour_areas <= 10)),
+            np.count_nonzero((tumour_areas >= 11) & (tumour_areas <= 50)),
+            np.count_nonzero((tumour_areas >= 51) & (tumour_areas <= 200)),
+            np.count_nonzero(tumour_areas > 200),
+        ]
+    )
+
+    figure, axes = plt.subplots(1, 2, figsize=(13, 5))
+    if positive_areas.size > 0:
+        max_area = int(positive_areas.max())
+        if max_area == 1:
+            histogram_bins = np.asarray([0.5, 1.5])
+        else:
+            histogram_bins = np.unique(
+                np.geomspace(1, max_area + 1, num=min(40, max_area + 1))
+            )
+        axes[0].hist(positive_areas, bins=histogram_bins, edgecolor='black')
+        axes[0].set_xscale('log')
+    else:
+        axes[0].text(
+            0.5,
+            0.5,
+            'No tumour-positive slices',
+            ha='center',
+            va='center',
+            transform=axes[0].transAxes,
+        )
+    axes[0].set_title('Tumour Area Distribution (Positive Slices)')
+    axes[0].set_xlabel('GT tumour area (pixels, log scale)')
+    axes[0].set_ylabel('Number of slices')
+    axes[0].grid(axis='y', alpha=0.25)
+
+    group_labels = ('0', '1-10', '11-50', '51-200', '>200')
+    bars = axes[1].bar(group_labels, area_groups, edgecolor='black')
+    axes[1].bar_label(bars, padding=3)
+    axes[1].set_title('Slices Grouped by GT Tumour Area')
+    axes[1].set_xlabel('GT tumour area (pixels)')
+    axes[1].set_ylabel('Number of slices')
+    axes[1].grid(axis='y', alpha=0.25)
+
+    figure.suptitle(f'Tumour Area Statistics for {len(records)} Test Slices')
+    figure.tight_layout()
+    histogram_path = os.path.join(output_dir, 'tumour_area_histogram.png')
+    figure.savefig(histogram_path, dpi=150, bbox_inches='tight')
+    plt.close(figure)
+
+    logging.info('Saved tumour area statistics CSV to %s', csv_path)
+    logging.info('Saved tumour area histogram to %s', histogram_path)
+    logging.info(
+        'Tumour area groups [0, 1-10, 11-50, 51-200, >200]: %s',
+        area_groups.tolist(),
+    )
+
+
 def inference(args, multimask_output, model, test_save_path=None):
-    # Initialize 2D Dataset
+    # Require NIfTI output because the low-Dice list points to saved triplets.
     if test_save_path is None:
         raise ValueError(
             '--is_savenii is required because low_dice_sample.txt must point '
@@ -41,6 +127,7 @@ def inference(args, multimask_output, model, test_save_path=None):
     metric_list = 0.0
     valid_case_count = 0
     low_dice_samples = []
+    tumour_area_records = []
 
     for i_batch, sampled_batch in tqdm(enumerate(testloader)):
         image, label, case_name = (
@@ -49,7 +136,7 @@ def inference(args, multimask_output, model, test_save_path=None):
             sampled_batch['case_name'][0],
         )
 
-        # Direct 2D slice inference and metric evaluation
+        # Run direct 2D inference and evaluate all foreground classes.
         metric_i = test_single_slice(
             image,
             label,
@@ -67,6 +154,16 @@ def inference(args, multimask_output, model, test_save_path=None):
 
         # The tumour is class 1, so its metric is stored at index 0.
         tumour_dice = float(metric_i[0][0])
+        label_array = label.squeeze().cpu().numpy()
+        tumour_pixels = int(np.count_nonzero(label_array == 1))
+        tumour_area_records.append(
+            {
+                'case_name': case_name,
+                'tumour_pixels': tumour_pixels,
+                'tumour_area_fraction': tumour_pixels / label_array.size,
+                'tumour_dice': tumour_dice,
+            }
+        )
         if tumour_dice < args.low_dice_threshold:
             low_dice_samples.append(
                 os.path.abspath(
@@ -74,14 +171,14 @@ def inference(args, multimask_output, model, test_save_path=None):
                 )
             )
 
-        # Calculate average metric for current 2D slice
+        # Calculate average metrics for the current 2D slice.
         case_mean = np.mean(metric_i, axis=0)
         logging.info(
             'idx %d slice %s mean_dice %f mean_iou %f'
             % (i_batch, case_name, case_mean[0], case_mean[1])
         )
 
-        # Log metrics for each individual class in current slice
+        # Log metrics for each individual class in the current slice.
         for j in range(1, args.num_classes + 1):
             logging.info(
                 'name %s dice %f iou %f'
@@ -102,12 +199,13 @@ def inference(args, multimask_output, model, test_save_path=None):
         args.low_dice_threshold,
         low_dice_file,
     )
+    save_tumour_area_statistics(tumour_area_records, args.output_dir)
 
     if valid_case_count == 0:
-        logging.error("No valid 2D slices were evaluated!")
+        logging.error('No valid 2D slices were evaluated!')
         return 0
 
-    # Calculate overall average metrics across all evaluated 2D slices
+    # Calculate overall average metrics across all evaluated 2D slices.
     metric_list = metric_list / valid_case_count
     for i in range(1, args.num_classes + 1):
         logging.info(
@@ -127,16 +225,16 @@ def inference(args, multimask_output, model, test_save_path=None):
         'Overall 2D Testing Performance: mean_dice: %f | mean_iou: %f'
         % (performance, mean_iou)
     )
-    logging.info("Testing Finished!")
+    logging.info('Testing Finished!')
     return 1
 
 
 def config_to_dict(config):
     items_dict = {}
-    with open(config, 'r') as f:
-        items = f.readlines()
-    for i in range(len(items)):
-        key, value = items[i].strip().split(': ')
+    with open(config, 'r') as file:
+        items = file.readlines()
+    for item in items:
+        key, value = item.strip().split(': ')
         items_dict[key] = value
     return items_dict
 
@@ -203,9 +301,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--rank', type=int, default=4, help='Rank for LoRA adaptation'
     )
-    parser.add_argument(
-        '--module', type=str, default='sam_lora_image_encoder'
-    )
+    parser.add_argument('--module', type=str, default='sam_lora_image_encoder')
 
     args = parser.parse_args()
 
@@ -229,7 +325,7 @@ if __name__ == '__main__':
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    # Register model
+    # Register the segmentation model.
     sam, img_embedding_size = sam_model_registry[args.vit_name](
         image_size=args.img_size,
         num_classes=args.num_classes,
@@ -246,7 +342,7 @@ if __name__ == '__main__':
 
     multimask_output = args.num_classes > 1
 
-    # Initialize log
+    # Initialize file and console logging.
     log_folder = os.path.join(args.output_dir, 'test_log')
     os.makedirs(log_folder, exist_ok=True)
     logging.basicConfig(

@@ -27,6 +27,12 @@ test_list = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/posi
 
 def inference(args, multimask_output, model, test_save_path=None):
     # Initialize 2D Dataset
+    if test_save_path is None:
+        raise ValueError(
+            '--is_savenii is required because low_dice_sample.txt must point '
+            'to saved NIfTI triplets.'
+        )
+
     db_test = TestDataset(test_dir=test_list)
     testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=1)
     logging.info(f'{len(testloader)} test 2D slices in total')
@@ -34,6 +40,7 @@ def inference(args, multimask_output, model, test_save_path=None):
     model.eval()
     metric_list = 0.0
     valid_case_count = 0
+    low_dice_samples = []
 
     for i_batch, sampled_batch in tqdm(enumerate(testloader)):
         image, label, case_name = (
@@ -58,6 +65,15 @@ def inference(args, multimask_output, model, test_save_path=None):
         metric_list += np.array(metric_i)
         valid_case_count += 1
 
+        # The tumour is class 1, so its metric is stored at index 0.
+        tumour_dice = float(metric_i[0][0])
+        if tumour_dice < args.low_dice_threshold:
+            low_dice_samples.append(
+                os.path.abspath(
+                    os.path.join(test_save_path, f'{case_name}_gt.nii.gz')
+                )
+            )
+
         # Calculate average metric for current 2D slice
         case_mean = np.mean(metric_i, axis=0)
         logging.info(
@@ -75,6 +91,17 @@ def inference(args, multimask_output, model, test_save_path=None):
                     metric_i[j - 1][1],
                 )
             )
+
+    low_dice_file = os.path.join(args.output_dir, 'low_dice_sample.txt')
+    with open(low_dice_file, 'w', encoding='utf-8') as file:
+        for image_path in low_dice_samples:
+            file.write(f'{image_path}\n')
+    logging.info(
+        'Saved %d tumour slices with Dice < %.3f to %s',
+        len(low_dice_samples),
+        args.low_dice_threshold,
+        low_dice_file,
+    )
 
     if valid_case_count == 0:
         logging.error("No valid 2D slices were evaluated!")
@@ -123,6 +150,12 @@ if __name__ == '__main__':
         help='The config file provided by the trained model',
     )
     parser.add_argument('--num_classes', type=int, default=4)
+    parser.add_argument(
+        '--low_dice_threshold',
+        type=float,
+        default=0.5,
+        help='Tumour Dice threshold used to collect low-quality slices',
+    )
     parser.add_argument(
         '--output_dir',
         type=str,

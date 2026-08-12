@@ -26,6 +26,18 @@ def parse_args():
         help='Output PNG path (default: next to the sample list)',
     )
     parser.add_argument('--dpi', type=int, default=150)
+    parser.add_argument(
+        '--max-samples',
+        type=int,
+        default=30,
+        help='Maximum number of randomly selected samples to render',
+    )
+    parser.add_argument(
+        '--seed',
+        type=int,
+        default=1234,
+        help='Random seed used for reproducible sample selection',
+    )
     return parser.parse_args()
 
 
@@ -99,11 +111,27 @@ def draw_overlay(axis, image, mask):
     axis.axis('off')
 
 
-def visualize_samples(sample_list, output_path, dpi=150):
-    """Render every listed NIfTI triplet as one row in a single PNG."""
+def select_random_samples(paths, max_samples, seed):
+    """Select a reproducible subset without replacement."""
+    if max_samples <= 0:
+        raise ValueError(f'--max-samples must be positive, got: {max_samples}')
+    if len(paths) <= max_samples:
+        return paths
+
+    random_generator = np.random.default_rng(seed)
+    selected_indices = random_generator.choice(
+        len(paths), size=max_samples, replace=False
+    )
+    return [paths[index] for index in selected_indices]
+
+
+def visualize_samples(sample_list, output_path, dpi=150, max_samples=30, seed=1234):
+    """Render a random subset of listed NIfTI triplets into one PNG."""
     gt_paths = load_sample_paths(sample_list)
     if not gt_paths:
         raise ValueError(f'No low-Dice samples were listed in: {sample_list}')
+    total_samples = len(gt_paths)
+    gt_paths = select_random_samples(gt_paths, max_samples, seed)
 
     figure, axes = plt.subplots(
         len(gt_paths),
@@ -143,7 +171,10 @@ def visualize_samples(sample_list, output_path, dpi=150):
     figure.tight_layout()
     figure.savefig(output_path, dpi=dpi, bbox_inches='tight')
     plt.close(figure)
-    print(f'Saved {len(gt_paths)} low-Dice samples to: {output_path}')
+    print(
+        f'Saved {len(gt_paths)} randomly selected samples '
+        f'from {total_samples} low-Dice samples to: {output_path}'
+    )
 
 
 def main():
@@ -155,7 +186,13 @@ def main():
             os.path.dirname(os.path.abspath(args.sample_list)),
             'low_dice_samples.png',
         )
-    visualize_samples(args.sample_list, output_path, dpi=args.dpi)
+    visualize_samples(
+        args.sample_list,
+        output_path,
+        dpi=args.dpi,
+        max_samples=args.max_samples,
+        seed=args.seed,
+    )
 
 
 if __name__ == '__main__':

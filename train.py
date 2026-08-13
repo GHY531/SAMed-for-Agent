@@ -24,9 +24,9 @@ parser.add_argument('--num_classes', type=int,
 parser.add_argument('--max_iterations', type=int,
                     default=21000, help='maximum epoch number to train')
 parser.add_argument('--max_epochs', type=int,
-                    default=20, help='maximum epoch number to train')
+                    default=5, help='maximum epoch number to train')
 parser.add_argument('--stop_epoch', type=int,
-                    default=20, help='maximum epoch number to train')
+                    default=5, help='maximum epoch number to train')
 parser.add_argument('--batch_size', type=int,
                     default=16, help='batch_size per gpu')
 parser.add_argument('--n_gpu', type=int, default=2, help='total gpu')
@@ -34,11 +34,41 @@ parser.add_argument(
     '--negative_per_positive',
     type=int,
     default=2,
-    help='Number of tumour-negative slices sampled per tumour-positive slice',
+    help='Number of tumour-absent slices sampled per tumour-present slice',
+)
+parser.add_argument(
+    '--train_data_type',
+    choices=['inhouse_3d', 'pants_2d'],
+    default='inhouse_3d',
+    help='Dataset layout used for training',
+)
+parser.add_argument(
+    '--train_list',
+    type=str,
+    default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/lists/lists_Pancreas/train_list.txt',
+    help='Training manifest containing case directories or 2D label paths',
+)
+parser.add_argument(
+    '--val_list',
+    type=str,
+    required=True,
+    help='Fixed case-level validation manifest used for checkpoint selection',
+)
+parser.add_argument(
+    '--rotation_k',
+    type=int,
+    choices=[0, 1, 2, 3],
+    default=3,
+    help='Fixed in-plane 90-degree counterclockwise rotations for in-house data',
+)
+parser.add_argument(
+    '--enable_random_orientation',
+    action='store_true',
+    help='Enable random 90-degree rotations and flips after the fixed orientation',
 )
 parser.add_argument('--deterministic', type=int, default=1,
                     help='whether use deterministic training')
-parser.add_argument('--base_lr', type=float, default=0.0005,
+parser.add_argument('--base_lr', type=float, default=0.00005,
                     help='segmentation network learning rate')
 parser.add_argument('--img_size', type=int,
                     default=512, help='input patch size of network input')

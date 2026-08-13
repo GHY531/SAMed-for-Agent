@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import sys
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,16 +10,91 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import DiceLoss, Focal_loss, WeightedDiceLoss
+from utils import DiceLoss, Focal_loss, WeightedDiceLoss, test_single_volume
 from torchvision import transforms
 from datasets.direct_dataset import (
     DirectDataset,
-    RandomGenerator,
+    RandomGenerator as DirectRandomGenerator,
     TumourBalancedBatchSampler,
 )
+from datasets.merged_dataset import (
+    MergedDataset,
+    RandomGenerator as MergedRandomGenerator,
+)
+from datasets.test_dataset import TestDataset
 
 dice_weights_list = [0.2, 3, 0.5, 1.5, 1.5]
 focal_weights_list = [0.05, 10, 0.5, 1.5, 1.5]
+
+
+def validate_case_tumour_dice(
+    model,
+    val_loader,
+    multimask_output,
+    patch_size,
+    rotation_k,
+):
+    """Return mean case-level tumour Dice on tumour-bearing evaluation subsets."""
+    model.eval()
+    case_dice_scores = []
+    skipped_cases = 0
+
+    for sampled_batch in val_loader:
+        image = sampled_batch['image']
+        label = sampled_batch['label']
+        case_name = sampled_batch['case_name'][0]
+        label_slices = label.squeeze(0)
+        valid_mask = (label_slices == 2).flatten(1).any(dim=1)
+        valid_indices = torch.where(valid_mask)[0]
+
+        if len(valid_indices) == 0:
+            logging.warning(
+                'Validation case %s has no aorta-visible slice and was skipped',
+                case_name,
+            )
+            skipped_cases += 1
+            continue
+        if not (label_slices[valid_indices] == 1).any():
+            logging.warning(
+                'Validation case %s has no tumour GT in the evaluation subset '
+                'and was excluded from tumour-Dice model selection',
+                case_name,
+            )
+            skipped_cases += 1
+            continue
+
+        image = torch.rot90(image, k=rotation_k, dims=(-2, -1))
+        label = torch.rot90(label, k=rotation_k, dims=(-2, -1))
+        metric_list = test_single_volume(
+            image=image,
+            label=label,
+            net=model,
+            classes=1,
+            multimask_output=multimask_output,
+            patch_size=[patch_size, patch_size],
+            valid_slice_indices=valid_indices,
+        )
+        tumour_dice = float(metric_list[0][0])
+        case_dice_scores.append(tumour_dice)
+        logging.info(
+            'Validation case %s tumour Dice: %.6f',
+            case_name,
+            tumour_dice,
+        )
+
+    model.train()
+    if not case_dice_scores:
+        raise RuntimeError(
+            'No validation case contains tumour GT in the evaluation subset.'
+        )
+    mean_tumour_dice = float(np.mean(case_dice_scores))
+    logging.info(
+        'Validation mean case-level tumour Dice: %.6f over %d cases; skipped %d',
+        mean_tumour_dice,
+        len(case_dice_scores),
+        skipped_cases,
+    )
+    return mean_tumour_dice
 
 def calc_loss(outputs, low_res_label_batch, ce_loss, dice_loss, focal_loss,
             ce_weight:float=0.1,
@@ -42,11 +118,35 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     num_classes = args.num_classes
     batch_size = args.batch_size * args.n_gpu
     # max_iterations = args.max_iterations
-    train_list_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/train.txt'
-    #train_list_path could be your own path to your train_list
-    db_train = DirectDataset(label_path = train_list_path,
-                               transform=transforms.Compose(
-                                   [RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res])]))
+    if args.train_data_type == 'inhouse_3d':
+        db_train = MergedDataset(
+            list_path=args.train_list,
+            rotation_k=args.rotation_k,
+            num_classes=args.num_classes,
+            transform=transforms.Compose([
+                MergedRandomGenerator(
+                    output_size=[args.img_size, args.img_size],
+                    low_res=[low_res, low_res],
+                    enable_random_orientation=args.enable_random_orientation,
+                )
+            ]),
+        )
+    else:
+        db_train = DirectDataset(
+            label_path=args.train_list,
+            transform=transforms.Compose([
+                DirectRandomGenerator(
+                    output_size=[args.img_size, args.img_size],
+                    low_res=[low_res, low_res],
+                )
+            ]),
+        )
+    logging.info(
+        'Training data type: %s; list: %s; fixed rotation_k: %d',
+        args.train_data_type,
+        args.train_list,
+        args.rotation_k if args.train_data_type == 'inhouse_3d' else 0,
+    )
     print("The length of train set is: {}".format(len(db_train)))
     batch_sampler = TumourBalancedBatchSampler(
         positive_indices=db_train.positive_indices,
@@ -56,7 +156,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
         seed=args.seed,
     )
     logging.info(
-        'Training slices: %d tumour-positive and %d tumour-negative',
+        'Positive-case training slices: %d tumour-present and %d tumour-absent',
         len(db_train.positive_indices),
         len(db_train.negative_indices),
     )
@@ -67,7 +167,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
         args.n_gpu,
     )
     logging.info(
-        'Tumour-positive slices per batch: %d-%d; epoch ratio: %.4f',
+        'Tumour-present slices per batch: %d-%d; epoch ratio: %.4f',
         min(batch_sampler.positive_counts_per_batch),
         max(batch_sampler.positive_counts_per_batch),
         batch_sampler.positive_count_per_epoch
@@ -83,6 +183,21 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
         num_workers=8,
         pin_memory=True,
         worker_init_fn=worker_init_fn,
+    )
+    val_dataset = TestDataset(list_path=args.val_list)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=1,
+        pin_memory=True,
+    )
+    if len(val_dataset) == 0:
+        raise ValueError(f'No validation cases found in {args.val_list}.')
+    logging.info(
+        'Validation cases: %d; list: %s; selection metric: case tumour Dice',
+        len(val_dataset),
+        args.val_list,
     )
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
@@ -106,7 +221,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     stop_epoch = args.stop_epoch
     max_iterations = args.max_epochs * len(trainloader)  # max_epoch = max_iterations // len(trainloader) + 1
     logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
-    best_performance = float('inf')
+    best_tumour_dice = float('-inf')
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
         batch_sampler.set_epoch(epoch_num)
@@ -167,27 +282,43 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
                     model.module.save_lora_parameters(iter_save_path)
                 logging.info(f"Saved LoRA weights at iteration {iter_num} to {iter_save_path}")
 
-        #save the best and last epoch
+        # Select the best checkpoint using case-level tumour Dice.
         epoch_avg_dice = epoch_dice_sum / max(epoch_batch_count, 1)
         epoch_avg_focal = epoch_focal_sum / max(epoch_batch_count, 1)
-        epoch_avg_loss = 0.7 * epoch_avg_dice + 0.3 * epoch_avg_focal
 
         logging.info("epoch %d : avg loss_dice: %f, ave loss_focal: %f" % (epoch_num, epoch_avg_dice, epoch_avg_focal))
-        if epoch_avg_loss < best_performance:
-            best_performance = epoch_avg_loss
+        validation_tumour_dice = validate_case_tumour_dice(
+            model=model,
+            val_loader=val_loader,
+            multimask_output=multimask_output,
+            patch_size=args.img_size,
+            rotation_k=args.rotation_k,
+        )
+        writer.add_scalar(
+            'Validation/case_tumour_dice',
+            validation_tumour_dice,
+            epoch_num + 1,
+        )
+        if validation_tumour_dice > best_tumour_dice:
+            best_tumour_dice = validation_tumour_dice
             best_save_path = os.path.join(snapshot_path, 'best.pth')
             try:
                 model.save_lora_parameters(best_save_path)
-            except:
+            except AttributeError:
                 model.module.save_lora_parameters(best_save_path)
-            logging.info("new best epoch %d (avg loss_dice %f), save model to %s"
-                         % (epoch_num, best_performance, best_save_path))
+            logging.info(
+                'New best epoch %d (validation case tumour Dice %.6f), '
+                'saved model to %s',
+                epoch_num + 1,
+                best_tumour_dice,
+                best_save_path,
+            )
 
         if epoch_num >= max_epoch - 1 or epoch_num >= stop_epoch - 1:
             last_save_path = os.path.join(snapshot_path, 'last.pth')
             try:
                 model.save_lora_parameters(last_save_path)
-            except:
+            except AttributeError:
                 model.module.save_lora_parameters(last_save_path)
             logging.info("save last epoch model to {}".format(last_save_path))
             iterator.close()

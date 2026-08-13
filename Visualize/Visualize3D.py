@@ -36,16 +36,9 @@ def parse_args():
         help='Directory containing image, ground truth, prediction, and evaluation mask',
     )
     parser.add_argument(
-        '--slice-indices',
-        type=int,
-        nargs='+',
-        default=None,
-        help='Exactly 18 original Z indices; evenly selected when omitted',
-    )
-    parser.add_argument(
         '--output',
         default=None,
-        help='Output PNG path (default: visualization_18_slices.png)',
+        help='Output PNG path (default: visualization_all_slices.png)',
     )
     parser.add_argument(
         '--alpha',
@@ -53,7 +46,7 @@ def parse_args():
         default=0.72,
         help='Opacity of non-background label overlays',
     )
-    parser.add_argument('--dpi', type=int, default=180)
+    parser.add_argument('--dpi', type=int, default=120)
     return parser.parse_args()
 
 
@@ -90,45 +83,13 @@ def load_case(case_dir):
     return volumes
 
 
-def select_slices(evaluation_mask, requested_indices, slice_count=18):
-    """Select distinct evaluated Z slices at approximately uniform intervals."""
+def get_evaluated_slices(evaluation_mask):
+    """Return every evaluated Z slice in its original ascending order."""
     evaluated_slices = np.any(evaluation_mask > 0, axis=(1, 2))
-    candidate_indices = np.flatnonzero(evaluated_slices)
-    if requested_indices is None:
-        if candidate_indices.size < slice_count:
-            raise ValueError(
-                f'At least {slice_count} evaluated slices are required, but only '
-                f'{candidate_indices.size} were found.'
-            )
-        positions = np.linspace(
-            0,
-            candidate_indices.size - 1,
-            num=slice_count,
-            dtype=int,
-        )
-        return candidate_indices[positions].astype(int).tolist()
-
-    if len(requested_indices) != slice_count:
-        raise ValueError(
-            f'--slice-indices requires exactly {slice_count} values, '
-            f'got {len(requested_indices)}.'
-        )
-    if len(set(requested_indices)) != slice_count:
-        raise ValueError('--slice-indices must contain 18 distinct values.')
-
-    total_slices = evaluation_mask.shape[0]
-    for slice_index in requested_indices:
-        if slice_index < 0 or slice_index >= total_slices:
-            raise IndexError(
-                f'Each slice index must be within [0, {total_slices - 1}], '
-                f'got {slice_index}.'
-            )
-        if not evaluated_slices[slice_index]:
-            raise ValueError(
-                f'Slice {slice_index} was not evaluated according to '
-                'evaluation_mask.nii.gz.'
-            )
-    return sorted(requested_indices)
+    selected_indices = np.flatnonzero(evaluated_slices).astype(int).tolist()
+    if not selected_indices:
+        raise ValueError('The evaluation mask does not contain any evaluated slice.')
+    return selected_indices
 
 
 def normalize_image(image):
@@ -182,20 +143,16 @@ def class_dice(ground_truth, prediction, class_index):
 
 def visualize_case(
     case_dir,
-    slice_indices=None,
     output_path=None,
     alpha=0.72,
-    dpi=180,
+    dpi=120,
 ):
-    """Render 18 selected slices from one saved 3D case into a single PNG."""
+    """Render all evaluated slices from one saved 3D case into a single PNG."""
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f'--alpha must be within [0, 1], got {alpha}')
     case_dir = os.path.abspath(case_dir)
     volumes = load_case(case_dir)
-    selected_indices = select_slices(
-        volumes['evaluation_mask'],
-        slice_indices,
-    )
+    selected_indices = get_evaluated_slices(volumes['evaluation_mask'])
 
     unknown_labels = (
         set(np.unique(volumes['ground_truth'][selected_indices]).tolist())
@@ -206,12 +163,12 @@ def visualize_case(
 
     colormap, normalization = build_label_colormap(alpha)
     slices_per_row = 3
-    row_count = len(selected_indices) // slices_per_row
+    row_count = int(np.ceil(len(selected_indices) / slices_per_row))
     columns_per_slice = 3
     figure, axes = plt.subplots(
         row_count,
         slices_per_row * columns_per_slice,
-        figsize=(21, 17),
+        figsize=(21, max(5.4, row_count * 2.8)),
         squeeze=False,
     )
 
@@ -258,6 +215,13 @@ def visualize_case(
             normalization,
         )
 
+    unused_slice_slots = row_count * slices_per_row - len(selected_indices)
+    for unused_offset in range(unused_slice_slots):
+        unused_slice_column = slices_per_row - unused_slice_slots + unused_offset
+        column_start = unused_slice_column * columns_per_slice
+        for column in range(column_start, column_start + columns_per_slice):
+            axes[-1, column].axis('off')
+
     legend_handles = [
         mpatches.Patch(color=CLASS_COLORS[index], label=CLASS_NAMES[index])
         for index in sorted(CLASS_NAMES)
@@ -271,21 +235,22 @@ def visualize_case(
     )
     case_name = os.path.basename(os.path.normpath(case_dir))
     figure.suptitle(
-        f'{case_name} | 18 evaluated slices | rotated 90 degrees clockwise',
+        f'{case_name} | {len(selected_indices)} evaluated slices | '
+        'rotated 90 degrees clockwise',
         fontsize=14,
         fontweight='bold',
     )
     figure.tight_layout(rect=(0.0, 0.05, 1.0, 0.96), pad=0.5)
 
     if output_path is None:
-        output_path = os.path.join(case_dir, 'visualization_18_slices.png')
+        output_path = os.path.join(case_dir, 'visualization_all_slices.png')
     output_path = os.path.abspath(output_path)
     output_directory = os.path.dirname(output_path)
     if output_directory:
         os.makedirs(output_directory, exist_ok=True)
     figure.savefig(output_path, dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close(figure)
-    print(f'Selected original Z slices: {selected_indices}')
+    print(f'Visualized original Z slices: {selected_indices}')
     print(f'Saved visualization: {output_path}')
     return output_path
 
@@ -295,7 +260,6 @@ def main():
     args = parse_args()
     visualize_case(
         case_dir=args.case_dir,
-        slice_indices=args.slice_indices,
         output_path=args.output,
         alpha=args.alpha,
         dpi=args.dpi,

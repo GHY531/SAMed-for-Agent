@@ -248,7 +248,7 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         sitk.WriteImage(lab_itk, test_save_path + '/' + case + "_gt.nii.gz")
     return metric_list
 
-def test_single_slice(image, label, net, classes, multimask_output, patch_size=[256, 256], input_size=[224, 224],
+def test_single_slice(image, label, net, classes, multimask_output, patch_size=[256, 256],
                       test_save_path=None, case=None):
     # Squeeze batch and extra dimensions to ensure 2D shape (H, W)
     if isinstance(image, torch.Tensor):
@@ -264,14 +264,14 @@ def test_single_slice(image, label, net, classes, multimask_output, patch_size=[
     # Record original spatial dimensions
     x, y = image.shape[0], image.shape[1]
 
-    # Resize slice to input_size and patch_size if needed
+    # Resize directly from the original resolution to the model input resolution.
     slice_img = image
-    if x != input_size[0] or y != input_size[1]:
-        slice_img = zoom(slice_img, (input_size[0] / x, input_size[1] / y), order=3)
-
-    new_x, new_y = slice_img.shape[0], slice_img.shape[1]
-    if new_x != patch_size[0] or new_y != patch_size[1]:
-        slice_img = zoom(slice_img, (patch_size[0] / new_x, patch_size[1] / new_y), order=3)
+    if x != patch_size[0] or y != patch_size[1]:
+        slice_img = zoom(
+            slice_img,
+            (patch_size[0] / x, patch_size[1] / y),
+            order=3,
+        )
 
     # Prepare network input tensor (1, 3, H, W)
     inputs = torch.from_numpy(slice_img).unsqueeze(0).unsqueeze(0).float().cuda()

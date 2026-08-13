@@ -65,7 +65,7 @@ def inference(
 
         metric_i = test_single_volume(
             image, label, model, classes=args.num_classes, multimask_output=multimask_output,
-            patch_size=[args.img_size, args.img_size], input_size=[args.input_size, args.input_size],
+            patch_size=[args.img_size, args.img_size],
             test_save_path=test_save_path, case=case_name, z_spacing=z_spacing
         )
         
@@ -123,7 +123,6 @@ if __name__ == '__main__':
     parser.add_argument('--list_dir', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/lists/lists_Pancreas/test_list.txt', help='list_dir')
     parser.add_argument('--output_dir', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/test_result')
     parser.add_argument('--img_size', type=int, default=512, help='Input image size of the network')
-    parser.add_argument('--input_size', type=int, default=224, help='The input size for training SAM model')
     parser.add_argument('--seed', type=int,
                         default=1234, help='random seed')
     parser.add_argument('--is_savenii', action='store_true', help='Whether to save results during inference')

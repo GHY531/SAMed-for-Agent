@@ -53,15 +53,13 @@ def png2npy(img_dir, out_dir):
             np.save(out_path, img_array)
             print(f"Successfully convert: {file_name} -> {base_name}.npy")
 
-def PositiveSamples(label_dir, txt_path):
-    """
-    Find the Positive Samples
-    """
+def AortaVisibleSamples(label_dir, txt_path):
+    """Write label paths for slices containing the aorta class."""
     with open(txt_path, "w") as f:
         for label_path in Path(label_dir).glob("*.npy"):
             arr = np.load(label_path, mmap_mode="r")
 
-            if (arr == 1).any() and (arr == 2).any():
+            if (arr == 2).any():
                 f.write(f"{label_path}\n")
 
     return 1
@@ -84,5 +82,5 @@ if __name__ == '__main__':
     #print("Unique labels:", np.unique(sample)) #image 0~255
 
     label_dir = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/label'
-    txt_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_samples.txt'
-    PositiveSamples(label_dir, txt_path)
+    txt_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/aorta_visible_samples.txt'
+    AortaVisibleSamples(label_dir, txt_path)

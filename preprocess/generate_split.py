@@ -1,7 +1,7 @@
 import random
 import os
 
-test_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/positive_samples.txt'
+test_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/aorta_visible_samples.txt'
 
 # Read all non-empty lines into a list
 with open(test_path, 'r') as f:

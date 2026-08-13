@@ -154,13 +154,6 @@ def visualize_case(
     volumes = load_case(case_dir)
     selected_indices = get_evaluated_slices(volumes['evaluation_mask'])
 
-    unknown_labels = (
-        set(np.unique(volumes['ground_truth'][selected_indices]).tolist())
-        | set(np.unique(volumes['prediction'][selected_indices]).tolist())
-    ) - {0, *CLASS_NAMES.keys()}
-    if unknown_labels:
-        raise ValueError(f'Unsupported label values found: {sorted(unknown_labels)}')
-
     colormap, normalization = build_label_colormap(alpha)
     slices_per_row = 3
     row_count = int(np.ceil(len(selected_indices) / slices_per_row))
@@ -171,6 +164,7 @@ def visualize_case(
         figsize=(21, max(5.4, row_count * 2.8)),
         squeeze=False,
     )
+    supported_labels = [0, *CLASS_NAMES.keys()]
 
     for display_index, selected_index in enumerate(selected_indices):
         row = display_index // slices_per_row
@@ -184,6 +178,17 @@ def visualize_case(
         )
         prediction = rotate_clockwise(
             volumes['prediction'][selected_index].astype(np.int16)
+        )
+        # Hide labels outside classes 1-4 without modifying the source volumes.
+        ground_truth = np.where(
+            np.isin(ground_truth, supported_labels),
+            ground_truth,
+            0,
+        )
+        prediction = np.where(
+            np.isin(prediction, supported_labels),
+            prediction,
+            0,
         )
 
         image_axis = axes[row, column_start]

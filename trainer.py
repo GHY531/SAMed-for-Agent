@@ -11,7 +11,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils import DiceLoss, Focal_loss, WeightedDiceLoss
 from torchvision import transforms
-from datasets.direct_dataset import DirectDataset, RandomGenerator
+from datasets.direct_dataset import (
+    DirectDataset,
+    RandomGenerator,
+    TumourBalancedBatchSampler,
+)
 
 dice_weights_list = [0.2, 3, 0.5, 1.5, 1.5]
 focal_weights_list = [0.05, 10, 0.5, 1.5, 1.5]
@@ -44,12 +48,42 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
                                transform=transforms.Compose(
                                    [RandomGenerator(output_size=[args.img_size, args.img_size], low_res=[low_res, low_res])]))
     print("The length of train set is: {}".format(len(db_train)))
+    batch_sampler = TumourBalancedBatchSampler(
+        positive_indices=db_train.positive_indices,
+        negative_indices=db_train.negative_indices,
+        batch_size=batch_size,
+        negative_per_positive=args.negative_per_positive,
+        seed=args.seed,
+    )
+    logging.info(
+        'Training slices: %d tumour-positive and %d tumour-negative',
+        len(db_train.positive_indices),
+        len(db_train.negative_indices),
+    )
+    logging.info(
+        'Global batch size: %d (%d per GPU across %d GPUs)',
+        batch_size,
+        args.batch_size,
+        args.n_gpu,
+    )
+    logging.info(
+        'Tumour-positive slices per batch: %d-%d; epoch ratio: %.4f',
+        min(batch_sampler.positive_counts_per_batch),
+        max(batch_sampler.positive_counts_per_batch),
+        batch_sampler.positive_count_per_epoch
+        / (len(batch_sampler) * batch_size),
+    )
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
 
-    trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=8, pin_memory=True,
-                             worker_init_fn=worker_init_fn)
+    trainloader = DataLoader(
+        db_train,
+        batch_sampler=batch_sampler,
+        num_workers=8,
+        pin_memory=True,
+        worker_init_fn=worker_init_fn,
+    )
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
     model.train()
@@ -75,6 +109,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     best_performance = float('inf')
     iterator = tqdm(range(max_epoch), ncols=70)
     for epoch_num in iterator:
+        batch_sampler.set_epoch(epoch_num)
         epoch_dice_sum = 0.0
         epoch_focal_sum = 0.0
         epoch_batch_count = 0

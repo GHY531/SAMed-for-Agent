@@ -180,8 +180,18 @@ def calculate_metric_percase(pred, gt):
     else:
         return 0.0, 0.0
 
-def test_single_volume(image, label, net, classes, multimask_output, patch_size=[256, 256],
-                       test_save_path=None, case=None, z_spacing=1):
+def test_single_volume(
+    image,
+    label,
+    net,
+    classes,
+    multimask_output,
+    patch_size=[256, 256],
+    test_save_path=None,
+    case=None,
+    z_spacing=1,
+    valid_slice_indices=None,
+):
     image, label = image.squeeze(0).cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy()
     if image.ndim != 3 or label.ndim != 3:
         raise ValueError(
@@ -194,8 +204,22 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
             f'{image.shape} and {label.shape}.'
         )
 
+    if valid_slice_indices is None:
+        valid_slice_indices = np.arange(image.shape[0], dtype=np.int64)
+    elif isinstance(valid_slice_indices, torch.Tensor):
+        valid_slice_indices = valid_slice_indices.cpu().numpy().astype(np.int64)
+    else:
+        valid_slice_indices = np.asarray(valid_slice_indices, dtype=np.int64)
+
+    if valid_slice_indices.ndim != 1:
+        raise ValueError('valid_slice_indices must be a one-dimensional sequence.')
+    if valid_slice_indices.size == 0:
+        raise ValueError('At least one valid slice index is required.')
+    if np.any(valid_slice_indices < 0) or np.any(valid_slice_indices >= image.shape[0]):
+        raise IndexError('valid_slice_indices contains an out-of-range slice index.')
+
     prediction = np.zeros_like(label)
-    for ind in range(image.shape[0]):
+    for ind in valid_slice_indices:
         slice = image[ind, :, :]
         x, y = slice.shape
 
@@ -219,19 +243,35 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
                 pred = zoom(pred, (x / out_h, y / out_w), order=0)
             prediction[ind] = pred
     metric_list = []
+    evaluated_prediction = prediction[valid_slice_indices]
+    evaluated_label = label[valid_slice_indices]
     for i in range(1, classes + 1):
-        metric_list.append(calculate_metric_percase(prediction == i, label == i))
+        metric_list.append(
+            calculate_metric_percase(
+                evaluated_prediction == i,
+                evaluated_label == i,
+            )
+        )
 
     if test_save_path is not None:
+        if not case:
+            raise ValueError('A non-empty case name is required when saving NIfTI files.')
+        case_save_path = os.path.join(test_save_path, case)
+        os.makedirs(case_save_path, exist_ok=True)
+        evaluation_mask = np.zeros_like(label, dtype=np.uint8)
+        evaluation_mask[valid_slice_indices] = 1
         img_itk = sitk.GetImageFromArray(image.astype(np.float32))
-        prd_itk = sitk.GetImageFromArray(prediction.astype(np.float32))
-        lab_itk = sitk.GetImageFromArray(label.astype(np.float32))
+        prd_itk = sitk.GetImageFromArray(prediction.astype(np.uint8))
+        lab_itk = sitk.GetImageFromArray(label.astype(np.uint8))
+        mask_itk = sitk.GetImageFromArray(evaluation_mask)
         img_itk.SetSpacing((1, 1, z_spacing))
         prd_itk.SetSpacing((1, 1, z_spacing))
         lab_itk.SetSpacing((1, 1, z_spacing))
-        sitk.WriteImage(prd_itk, test_save_path + '/' + case + "_pred.nii.gz")
-        sitk.WriteImage(img_itk, test_save_path + '/' + case + "_img.nii.gz")
-        sitk.WriteImage(lab_itk, test_save_path + '/' + case + "_gt.nii.gz")
+        mask_itk.SetSpacing((1, 1, z_spacing))
+        sitk.WriteImage(prd_itk, os.path.join(case_save_path, 'prediction.nii.gz'))
+        sitk.WriteImage(img_itk, os.path.join(case_save_path, 'image.nii.gz'))
+        sitk.WriteImage(lab_itk, os.path.join(case_save_path, 'ground_truth.nii.gz'))
+        sitk.WriteImage(mask_itk, os.path.join(case_save_path, 'evaluation_mask.nii.gz'))
     return metric_list
 
 def test_single_slice(image, label, net, classes, multimask_output, patch_size=[256, 256],

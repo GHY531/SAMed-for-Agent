@@ -30,6 +30,12 @@ parser.add_argument('--stop_epoch', type=int,
 parser.add_argument('--batch_size', type=int,
                     default=16, help='batch_size per gpu')
 parser.add_argument('--n_gpu', type=int, default=2, help='total gpu')
+parser.add_argument(
+    '--negative_per_positive',
+    type=int,
+    default=2,
+    help='Number of tumour-negative slices sampled per tumour-positive slice',
+)
 parser.add_argument('--deterministic', type=int, default=1,
                     help='whether use deterministic training')
 parser.add_argument('--base_lr', type=float, default=0.0005,

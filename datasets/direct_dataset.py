@@ -2,7 +2,7 @@ import os
 import numpy as np
 from scipy import ndimage
 from scipy.ndimage.interpolation import zoom
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 import random
 import torch
 from einops import repeat
@@ -51,6 +51,8 @@ class DirectDataset(Dataset):
     def __init__(self, label_path, transform=None):
         self.transform = transform
         self.index = []
+        self.positive_indices = []
+        self.negative_indices = []
 
         with open(label_path) as f:
             label_paths = [line.strip() for line in f.readlines() if line.strip()]
@@ -59,10 +61,15 @@ class DirectDataset(Dataset):
             if not os.path.exists(label_path):
                 continue
 
-            label = np.load(label_path)
+            label = np.load(label_path, mmap_mode='r')
 
-            if np.any(label) and (2 in label):
+            if np.any(label == 2):
+                dataset_index = len(self.index)
                 self.index.append(label_path)
+                if np.any(label == 1):
+                    self.positive_indices.append(dataset_index)
+                else:
+                    self.negative_indices.append(dataset_index)
 
     def get_image_path(self, label_path):
         """
@@ -98,3 +105,95 @@ class DirectDataset(Dataset):
         sample['case_name'] = file_stem
 
         return sample
+
+
+class TumourBalancedBatchSampler(Sampler):
+    """Yield batches whose epoch-level positive ratio follows a target ratio."""
+
+    def __init__(
+        self,
+        positive_indices,
+        negative_indices,
+        batch_size,
+        negative_per_positive=2,
+        seed=1234,
+    ):
+        if negative_per_positive < 1:
+            raise ValueError('negative_per_positive must be at least 1.')
+        samples_per_group = negative_per_positive + 1
+        if batch_size < samples_per_group:
+            raise ValueError(
+                'batch_size must be at least negative_per_positive + 1.'
+            )
+        if not positive_indices:
+            raise ValueError('At least one tumour-positive index is required.')
+        if not negative_indices:
+            raise ValueError('At least one tumour-negative index is required.')
+
+        self.positive_indices = list(positive_indices)
+        self.negative_indices = list(negative_indices)
+        self.batch_size = batch_size
+        self.negative_per_positive = negative_per_positive
+        self.seed = seed
+        self.epoch = 0
+        self.num_batches = (
+            len(self.positive_indices) * samples_per_group + batch_size - 1
+        ) // batch_size
+        self.positive_counts_per_batch = [
+            ((batch_index + 1) * batch_size) // samples_per_group
+            - (batch_index * batch_size) // samples_per_group
+            for batch_index in range(self.num_batches)
+        ]
+        self.positive_count_per_epoch = sum(self.positive_counts_per_batch)
+        self.negative_count_per_epoch = (
+            self.num_batches * batch_size - self.positive_count_per_epoch
+        )
+
+    def set_epoch(self, epoch):
+        """Select the deterministic shuffle sequence for one epoch."""
+        self.epoch = epoch
+
+    @staticmethod
+    def _sample_indices(indices, sample_count, generator):
+        """Sample shuffled indices, cycling only when the pool is exhausted."""
+        sampled_indices = []
+        while len(sampled_indices) < sample_count:
+            shuffled_indices = indices.copy()
+            generator.shuffle(shuffled_indices)
+            remaining = sample_count - len(sampled_indices)
+            sampled_indices.extend(shuffled_indices[:remaining])
+        return sampled_indices
+
+    def __iter__(self):
+        generator = random.Random(self.seed + self.epoch)
+        positive_counts_per_batch = self.positive_counts_per_batch.copy()
+        generator.shuffle(positive_counts_per_batch)
+        sampled_positive = self._sample_indices(
+            self.positive_indices,
+            self.positive_count_per_epoch,
+            generator,
+        )
+        sampled_negative = self._sample_indices(
+            self.negative_indices,
+            self.negative_count_per_epoch,
+            generator,
+        )
+
+        positive_start = 0
+        negative_start = 0
+        for batch_index in range(self.num_batches):
+            positive_count = positive_counts_per_batch[batch_index]
+            negative_count = self.batch_size - positive_count
+            batch = sampled_positive[
+                positive_start:positive_start + positive_count
+            ]
+            batch += sampled_negative[
+                negative_start:negative_start + negative_count
+            ]
+            positive_start += positive_count
+            negative_start += negative_count
+            generator.shuffle(batch)
+            yield batch
+
+    def __len__(self):
+        return self.num_batches

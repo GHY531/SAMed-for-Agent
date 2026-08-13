@@ -4,6 +4,7 @@ from tqdm import tqdm
 import logging
 import numpy as np
 import argparse
+import json
 import random
 import numpy as np
 import torch
@@ -39,7 +40,10 @@ def inference(
     valid_case_count = 0
 
     for i_batch, sampled_batch in tqdm(enumerate(testloader)):
-        image, label, case_name = sampled_batch['image'], sampled_batch['label'], sampled_batch['case_name'][0]
+        image = sampled_batch['image']
+        label = sampled_batch['label']
+        case_name = sampled_batch['case_name'][0]
+        label_path = sampled_batch['label_path'][0]
 
         # ------------------- Optimized Slice Filtering (Pure PyTorch) -------------------
         # label shape: [1, N, H, W] -> label_sq shape: [N, H, W]
@@ -58,16 +62,49 @@ def inference(
             logging.warning(f"Case {case_name} has no valid slices (all background or missing class 2), skipped.")
             continue
 
-        # Keep only valid slices along the N dimension (dim=1)
-        image = image[:, valid_indices, :, :]
-        label = label[:, valid_indices, :, :]
-        # --------------------------------------------------------------------------------
-
         metric_i = test_single_volume(
             image, label, model, classes=args.num_classes, multimask_output=multimask_output,
             patch_size=[args.img_size, args.img_size],
-            test_save_path=test_save_path, case=case_name, z_spacing=z_spacing
+            test_save_path=test_save_path, case=case_name, z_spacing=z_spacing,
+            valid_slice_indices=valid_indices,
         )
+
+        if test_save_path is not None:
+            case_save_path = os.path.join(test_save_path, case_name)
+            expected_files = (
+                'prediction.nii.gz',
+                'image.nii.gz',
+                'ground_truth.nii.gz',
+                'evaluation_mask.nii.gz',
+            )
+            missing_files = [
+                filename for filename in expected_files
+                if not os.path.isfile(os.path.join(case_save_path, filename))
+            ]
+            if missing_files:
+                raise RuntimeError(
+                    f'Failed to save NIfTI files for {case_name}: {missing_files}'
+                )
+            metadata = {
+                'case_name': case_name,
+                'source_label_path': os.path.abspath(label_path),
+                'volume_shape_nhw': list(label.shape[1:]),
+                'evaluated_slice_count': len(valid_indices),
+                'total_slice_count': label.shape[1],
+                'evaluated_slice_indices': valid_indices.cpu().tolist(),
+                'class_names': class_to_name,
+                'spacing_xyz': [1, 1, z_spacing],
+            }
+            metadata_path = os.path.join(case_save_path, 'metadata.json')
+            with open(metadata_path, 'w', encoding='utf-8') as metadata_file:
+                json.dump(metadata, metadata_file, indent=2, ensure_ascii=False)
+            logging.info(
+                'Saved case %s to %s using %d/%d evaluated slices',
+                case_name,
+                case_save_path,
+                len(valid_indices),
+                label.shape[1],
+            )
         
         metric_list += np.array(metric_i)
         valid_case_count += 1
@@ -183,8 +220,12 @@ if __name__ == '__main__':
     logging.info(str(args))
 
     if args.is_savenii:
-        test_save_path = os.path.join(args.output_dir, 'predictions')
+        test_save_path = os.path.abspath(
+            os.path.join(args.output_dir, 'predictions')
+        )
         os.makedirs(test_save_path, exist_ok=True)
+        logging.info('NIfTI saving is enabled: %s', test_save_path)
     else:
         test_save_path = None
+        logging.info('NIfTI saving is disabled')
     inference(args, multimask_output, z_spacing, net, test_save_path)

@@ -3,6 +3,8 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 import glob
+import hashlib
+import re
 
 
 class TestDataset(Dataset):
@@ -45,7 +47,24 @@ class TestDataset(Dataset):
                 )
 
                 if np.any(label) and np.any(label == 2):
-                    self.cases.append(label_path)
+                    self.cases.append({
+                        'label_path': label_path,
+                        'case_name': self._build_case_name(label_path),
+                    })
+
+    @staticmethod
+    def _build_case_name(label_path):
+        """Build a readable and collision-resistant identifier from a case path."""
+        normalized_path = os.path.normpath(os.path.abspath(label_path))
+        path_parts = normalized_path.split(os.sep)
+        parent_parts = path_parts[:-1]
+        readable_parts = parent_parts[-3:] if parent_parts else ['case']
+        readable_name = '__'.join(readable_parts)
+        readable_name = re.sub(r'[^A-Za-z0-9._-]+', '_', readable_name)
+        path_digest = hashlib.sha1(
+            os.path.normcase(normalized_path).encode('utf-8')
+        ).hexdigest()[:10]
+        return f'{readable_name}__{path_digest}'
 
 
     def __len__(self):
@@ -53,8 +72,8 @@ class TestDataset(Dataset):
 
 
     def __getitem__(self, idx):
-
-        label_path = self.cases[idx]
+        case_record = self.cases[idx]
+        label_path = case_record['label_path']
 
         image_path = os.path.join(
             os.path.dirname(label_path),
@@ -86,13 +105,12 @@ class TestDataset(Dataset):
         sample = {
             'image': torch.from_numpy(image).float(),
             'label': torch.from_numpy(label).float(),
+            'label_path': label_path,
         }
 
         if self.transform:
             sample = self.transform(sample)
 
-        sample['case_name'] = os.path.splitext(
-            os.path.basename(label_path)
-        )[0]
+        sample['case_name'] = case_record['case_name']
 
         return sample

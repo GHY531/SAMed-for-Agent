@@ -179,21 +179,19 @@ def visualize_sample(
     )
 
     colormap, normalization = build_label_colormap(alpha)
-    slices_per_row = 3
-    row_count = int(np.ceil(len(selected_indices) / slices_per_row))
+    row_count = len(selected_indices)
     columns_per_slice = 3
     figure, axes = plt.subplots(
         row_count,
-        slices_per_row * columns_per_slice,
-        figsize=(21, max(5.4, row_count * 2.8)),
+        columns_per_slice,
+        figsize=(12, max(3.6, row_count * 3.6)),
         squeeze=False,
     )
     supported_labels = [0, *CLASS_NAMES.keys()]
 
     for display_index, selected_index in enumerate(selected_indices):
-        row = display_index // slices_per_row
-        slice_column = display_index % slices_per_row
-        column_start = slice_column * columns_per_slice
+        row = display_index
+        column_start = 0
         image = rotate_clockwise(
             normalize_image(volumes['image'][selected_index])
         )
@@ -243,13 +241,6 @@ def visualize_sample(
             colormap,
             normalization,
         )
-
-    unused_slice_slots = row_count * slices_per_row - len(selected_indices)
-    for unused_offset in range(unused_slice_slots):
-        unused_slice_column = slices_per_row - unused_slice_slots + unused_offset
-        column_start = unused_slice_column * columns_per_slice
-        for column in range(column_start, column_start + columns_per_slice):
-            axes[-1, column].axis('off')
 
     legend_handles = [
         mpatches.Patch(color=CLASS_COLORS[index], label=CLASS_NAMES[index])

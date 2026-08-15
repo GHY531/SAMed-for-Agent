@@ -125,9 +125,9 @@ def normalize_image(image):
     return np.clip(normalized, 0.0, 1.0)
 
 
-def rotate_counterclockwise(array):
-    """Rotate a 2D array counterclockwise by 90 degrees."""
-    return np.rot90(array, k=1)
+def preserve_orientation(array):
+    """Return the saved array without applying another display rotation."""
+    return array
 
 
 def build_label_colormap(alpha):
@@ -192,13 +192,13 @@ def visualize_sample(
     for display_index, selected_index in enumerate(selected_indices):
         row = display_index
         column_start = 0
-        image = rotate_counterclockwise(
+        image = preserve_orientation(
             normalize_image(volumes['image'][selected_index])
         )
-        ground_truth = rotate_counterclockwise(
+        ground_truth = preserve_orientation(
             volumes['ground_truth'][selected_index].astype(np.int16)
         )
-        prediction = rotate_counterclockwise(
+        prediction = preserve_orientation(
             volumes['prediction'][selected_index].astype(np.int16)
         )
         # Hide labels outside classes 1-4 without modifying the source volumes.
@@ -256,7 +256,7 @@ def visualize_sample(
     case_name = os.path.basename(os.path.dirname(os.path.abspath(image_path)))
     figure.suptitle(
         f'{case_name} | {len(selected_indices)} tumour-relevant slices | '
-        'rotated 90 degrees counterclockwise',
+        'saved orientation',
         fontsize=14,
         fontweight='bold',
     )

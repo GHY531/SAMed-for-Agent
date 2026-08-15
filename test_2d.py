@@ -112,13 +112,6 @@ def save_tumour_area_statistics(records, output_dir):
 
 
 def inference(args, multimask_output, model, test_save_path=None):
-    # Require NIfTI output because the low-Dice list points to saved triplets.
-    if test_save_path is None:
-        raise ValueError(
-            '--is_savenii is required because low_dice_sample.txt must point '
-            'to saved NIfTI triplets.'
-        )
-
     db_test = TestDataset(test_dir=test_list)
     testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=1)
     logging.info(f'{len(testloader)} test 2D slices in total')
@@ -126,6 +119,7 @@ def inference(args, multimask_output, model, test_save_path=None):
     model.eval()
     metric_list = 0.0
     valid_case_count = 0
+    low_dice_count = 0
     low_dice_samples = []
     tumour_area_records = []
 
@@ -144,6 +138,7 @@ def inference(args, multimask_output, model, test_save_path=None):
             classes=args.num_classes,
             multimask_output=multimask_output,
             patch_size=[args.img_size, args.img_size],
+            input_size=[args.input_size, args.input_size],
             test_save_path=test_save_path,
             case=case_name,
         )
@@ -164,11 +159,13 @@ def inference(args, multimask_output, model, test_save_path=None):
             }
         )
         if tumour_dice < args.low_dice_threshold:
-            low_dice_samples.append(
-                os.path.abspath(
-                    os.path.join(test_save_path, f'{case_name}_gt.nii.gz')
+            low_dice_count += 1
+            if test_save_path is not None:
+                low_dice_samples.append(
+                    os.path.abspath(
+                        os.path.join(test_save_path, f'{case_name}_gt.nii.gz')
+                    )
                 )
-            )
 
         # Calculate average metrics for the current 2D slice.
         case_mean = np.mean(metric_i, axis=0)
@@ -188,16 +185,24 @@ def inference(args, multimask_output, model, test_save_path=None):
                 )
             )
 
-    low_dice_file = os.path.join(args.output_dir, 'low_dice_sample.txt')
-    with open(low_dice_file, 'w', encoding='utf-8') as file:
-        for image_path in low_dice_samples:
-            file.write(f'{image_path}\n')
-    logging.info(
-        'Saved %d tumour slices with Dice < %.3f to %s',
-        len(low_dice_samples),
-        args.low_dice_threshold,
-        low_dice_file,
-    )
+    if test_save_path is not None:
+        low_dice_file = os.path.join(args.output_dir, 'low_dice_sample.txt')
+        with open(low_dice_file, 'w', encoding='utf-8') as file:
+            for image_path in low_dice_samples:
+                file.write(f'{image_path}\n')
+        logging.info(
+            'Saved %d tumour slices with Dice < %.3f to %s',
+            low_dice_count,
+            args.low_dice_threshold,
+            low_dice_file,
+        )
+    else:
+        logging.info(
+            'Found %d tumour slices with Dice < %.3f. NIfTI files and '
+            'low_dice_sample.txt were not saved because --is_savenii is disabled.',
+            low_dice_count,
+            args.low_dice_threshold,
+        )
     save_tumour_area_statistics(tumour_area_records, args.output_dir)
 
     if valid_case_count == 0:
@@ -263,6 +268,12 @@ if __name__ == '__main__':
         type=int,
         default=512,
         help='Input image size of the network',
+    )
+    parser.add_argument(
+        '--input_size',
+        type=int,
+        default=512,
+        help='Intermediate input size; keep equal to img_size to avoid repeated resizing',
     )
     parser.add_argument('--seed', type=int, default=1234, help='random seed')
     parser.add_argument(

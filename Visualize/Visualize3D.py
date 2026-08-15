@@ -27,18 +27,18 @@ CLASS_COLORS = {
 
 
 def parse_args():
-    """Parse one saved 3D case directory and visualization options."""
+    """Parse a low-Dice triplet list and batch rendering options."""
     parser = argparse.ArgumentParser(
-        description='Visualize one saved 3D NIfTI case after a clockwise rotation.'
+        description='Render low-Dice 3D NIfTI triplets into one PNG per case.'
     )
     parser.add_argument(
-        'case_dir',
-        help='Directory containing image, ground truth, prediction, and evaluation mask',
+        'sample_list',
+        help='Tab-separated image, ground-truth, and prediction paths from test_3d.py',
     )
     parser.add_argument(
-        '--output',
+        '--output-dir',
         default=None,
-        help='Output PNG path (default: visualization_all_slices.png)',
+        help='Directory for rendered PNG files (default: next to the sample list)',
     )
     parser.add_argument(
         '--alpha',
@@ -60,13 +60,32 @@ def load_volume(path):
     return volume
 
 
-def load_case(case_dir):
-    """Load and validate all volumes saved for one case."""
+def load_sample_paths(sample_list):
+    """Load tab-separated image, ground-truth, and prediction path triplets."""
+    if not os.path.isfile(sample_list):
+        raise FileNotFoundError(f'Sample list does not exist: {sample_list}')
+
+    samples = []
+    with open(sample_list, 'r', encoding='utf-8') as file:
+        for line_number, line in enumerate(file, start=1):
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+            paths = stripped_line.split('\t')
+            if len(paths) != 3:
+                raise ValueError(
+                    f'Line {line_number} must contain exactly three tab-separated paths.'
+                )
+            samples.append(tuple(paths))
+    return samples
+
+
+def load_sample(image_path, ground_truth_path, prediction_path):
+    """Load and validate one image, ground-truth, and prediction triplet."""
     paths = {
-        'image': os.path.join(case_dir, 'image.nii.gz'),
-        'ground_truth': os.path.join(case_dir, 'ground_truth.nii.gz'),
-        'prediction': os.path.join(case_dir, 'prediction.nii.gz'),
-        'evaluation_mask': os.path.join(case_dir, 'evaluation_mask.nii.gz'),
+        'image': image_path,
+        'ground_truth': ground_truth_path,
+        'prediction': prediction_path,
     }
     volumes = {name: load_volume(path) for name, path in paths.items()}
     reference_shape = volumes['image'].shape
@@ -83,12 +102,14 @@ def load_case(case_dir):
     return volumes
 
 
-def get_evaluated_slices(evaluation_mask):
-    """Return every evaluated Z slice in its original ascending order."""
-    evaluated_slices = np.any(evaluation_mask > 0, axis=(1, 2))
-    selected_indices = np.flatnonzero(evaluated_slices).astype(int).tolist()
+def get_tumour_slices(ground_truth, prediction):
+    """Return slices containing tumour in either ground truth or prediction."""
+    tumour_slices = np.any(
+        (ground_truth == 1) | (prediction == 1), axis=(1, 2)
+    )
+    selected_indices = np.flatnonzero(tumour_slices).astype(int).tolist()
     if not selected_indices:
-        raise ValueError('The evaluation mask does not contain any evaluated slice.')
+        raise ValueError('Neither ground truth nor prediction contains tumour slices.')
     return selected_indices
 
 
@@ -141,18 +162,21 @@ def class_dice(ground_truth, prediction, class_index):
     return float(2.0 * intersection / denominator)
 
 
-def visualize_case(
-    case_dir,
-    output_path=None,
+def visualize_sample(
+    image_path,
+    ground_truth_path,
+    prediction_path,
+    output_path,
     alpha=0.72,
     dpi=120,
 ):
-    """Render all evaluated slices from one saved 3D case into a single PNG."""
+    """Render tumour-relevant slices from one saved 3D triplet into a PNG."""
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f'--alpha must be within [0, 1], got {alpha}')
-    case_dir = os.path.abspath(case_dir)
-    volumes = load_case(case_dir)
-    selected_indices = get_evaluated_slices(volumes['evaluation_mask'])
+    volumes = load_sample(image_path, ground_truth_path, prediction_path)
+    selected_indices = get_tumour_slices(
+        volumes['ground_truth'], volumes['prediction']
+    )
 
     colormap, normalization = build_label_colormap(alpha)
     slices_per_row = 3
@@ -238,17 +262,15 @@ def visualize_case(
         frameon=False,
         fontsize=10,
     )
-    case_name = os.path.basename(os.path.normpath(case_dir))
+    case_name = os.path.basename(os.path.dirname(os.path.abspath(image_path)))
     figure.suptitle(
-        f'{case_name} | {len(selected_indices)} evaluated slices | '
+        f'{case_name} | {len(selected_indices)} tumour-relevant slices | '
         'rotated 90 degrees clockwise',
         fontsize=14,
         fontweight='bold',
     )
     figure.tight_layout(rect=(0.0, 0.05, 1.0, 0.96), pad=0.5)
 
-    if output_path is None:
-        output_path = os.path.join(case_dir, 'visualization_all_slices.png')
     output_path = os.path.abspath(output_path)
     output_directory = os.path.dirname(output_path)
     if output_directory:
@@ -260,12 +282,38 @@ def visualize_case(
     return output_path
 
 
+def visualize_samples(sample_list, output_dir, alpha=0.72, dpi=120):
+    """Render every low-Dice triplet in a list into a separate PNG file."""
+    samples = load_sample_paths(sample_list)
+    if not samples:
+        raise ValueError(f'No low-Dice samples were listed in: {sample_list}')
+
+    os.makedirs(output_dir, exist_ok=True)
+    for image_path, ground_truth_path, prediction_path in samples:
+        case_name = os.path.basename(os.path.dirname(os.path.abspath(image_path)))
+        output_path = os.path.join(output_dir, f'{case_name}.png')
+        visualize_sample(
+            image_path,
+            ground_truth_path,
+            prediction_path,
+            output_path,
+            alpha=alpha,
+            dpi=dpi,
+        )
+
+
 def main():
-    """Run the 3D case visualization command."""
+    """Run the batched low-Dice 3D visualization command."""
     args = parse_args()
-    visualize_case(
-        case_dir=args.case_dir,
-        output_path=args.output,
+    output_dir = args.output_dir
+    if output_dir is None:
+        output_dir = os.path.join(
+            os.path.dirname(os.path.abspath(args.sample_list)),
+            'low_dice_visualizations',
+        )
+    visualize_samples(
+        args.sample_list,
+        output_dir,
         alpha=args.alpha,
         dpi=args.dpi,
     )

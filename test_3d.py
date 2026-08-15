@@ -38,6 +38,8 @@ def inference(
     metric_list = 0.0
 
     valid_case_count = 0
+    low_dice_samples = []
+    low_dice_threshold = float(args.low_dice_threshold)
 
     for i_batch, sampled_batch in tqdm(enumerate(testloader)):
         image = sampled_batch['image']
@@ -68,6 +70,7 @@ def inference(
             test_save_path=test_save_path, case=case_name, z_spacing=z_spacing,
             valid_slice_indices=valid_indices,
         )
+        tumour_dice = float(metric_i[0][0])
 
         if test_save_path is not None:
             case_save_path = os.path.join(test_save_path, case_name)
@@ -105,6 +108,18 @@ def inference(
                 len(valid_indices),
                 label.shape[1],
             )
+            if tumour_dice < low_dice_threshold:
+                low_dice_samples.append(
+                    (
+                        os.path.abspath(os.path.join(case_save_path, 'image.nii.gz')),
+                        os.path.abspath(
+                            os.path.join(case_save_path, 'ground_truth.nii.gz')
+                        ),
+                        os.path.abspath(
+                            os.path.join(case_save_path, 'prediction.nii.gz')
+                        ),
+                    )
+                )
         
         metric_list += np.array(metric_i)
         valid_case_count += 1
@@ -122,6 +137,24 @@ def inference(
                 metric_i[j - 1][1]
                 )
             )
+
+    if test_save_path is not None:
+        low_dice_file = os.path.join(args.output_dir, 'low_dice_sample.txt')
+        with open(low_dice_file, 'w', encoding='utf-8') as file:
+            for image_path, ground_truth_path, prediction_path in low_dice_samples:
+                file.write(
+                    f'{image_path}\t{ground_truth_path}\t{prediction_path}\n'
+                )
+        logging.info(
+            'Saved %d tumour cases with Dice < %.3f to %s',
+            len(low_dice_samples),
+            low_dice_threshold,
+            low_dice_file,
+        )
+    else:
+        logging.info(
+            'Low-Dice list was not saved because --is_savenii is disabled.'
+        )
 
     if valid_case_count == 0:
         logging.error("No valid cases were evaluated!")
@@ -157,6 +190,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None, help='The config file provided by the trained model')
     parser.add_argument('--num_classes', type=int, default=4)
+    parser.add_argument(
+        '--low_dice_threshold',
+        type=float,
+        default=0.5,
+        help='Tumour Dice threshold used to collect low-quality 3D cases',
+    )
     parser.add_argument('--list_dir', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/lists/lists_Pancreas/test_list.txt', help='list_dir')
     parser.add_argument('--output_dir', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/test_result')
     parser.add_argument('--img_size', type=int, default=512, help='Input image size of the network')

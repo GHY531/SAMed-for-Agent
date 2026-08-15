@@ -40,12 +40,19 @@ def inference(
     valid_case_count = 0
     low_dice_samples = []
     low_dice_threshold = float(args.low_dice_threshold)
+    rotation_k = int(args.rotation_k)
+    if rotation_k not in (0, 1, 2, 3):
+        raise ValueError('rotation_k must be one of 0, 1, 2, or 3.')
 
     for i_batch, sampled_batch in tqdm(enumerate(testloader)):
         image = sampled_batch['image']
         label = sampled_batch['label']
         case_name = sampled_batch['case_name'][0]
         label_path = sampled_batch['label_path'][0]
+
+        # Match the fixed in-plane orientation used for in-house training.
+        image = torch.rot90(image, k=rotation_k, dims=(-2, -1))
+        label = torch.rot90(label, k=rotation_k, dims=(-2, -1))
 
         # ------------------- Optimized Slice Filtering (Pure PyTorch) -------------------
         # label shape: [1, N, H, W] -> label_sq shape: [N, H, W]
@@ -190,6 +197,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None, help='The config file provided by the trained model')
     parser.add_argument('--num_classes', type=int, default=4)
+    parser.add_argument(
+        '--rotation_k',
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=3,
+        help='Fixed in-plane 90-degree counterclockwise rotations for in-house data',
+    )
     parser.add_argument(
         '--low_dice_threshold',
         type=float,

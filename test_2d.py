@@ -138,7 +138,6 @@ def inference(args, multimask_output, model, test_save_path=None):
             classes=args.num_classes,
             multimask_output=multimask_output,
             patch_size=[args.img_size, args.img_size],
-            input_size=[args.input_size, args.input_size],
             test_save_path=test_save_path,
             case=case_name,
         )
@@ -268,12 +267,6 @@ if __name__ == '__main__':
         type=int,
         default=512,
         help='Input image size of the network',
-    )
-    parser.add_argument(
-        '--input_size',
-        type=int,
-        default=512,
-        help='Intermediate input size; keep equal to img_size to avoid repeated resizing',
     )
     parser.add_argument('--seed', type=int, default=1234, help='random seed')
     parser.add_argument(

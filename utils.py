@@ -180,6 +180,29 @@ def calculate_metric_percase(pred, gt):
     else:
         return 0.0, 0.0
 
+
+def calculate_slice_metrics(pred, gt, voxelspacing=(1.0, 1.0)):
+    """Calculate Dice, IoU, and a valid-or-undefined 2D HD95 for one class."""
+    pred = np.asarray(pred, dtype=bool)
+    gt = np.asarray(gt, dtype=bool)
+    pred_has_pixel = bool(pred.any())
+    gt_has_pixel = bool(gt.any())
+
+    dice, iou = calculate_metric_percase(pred.copy(), gt.copy())
+    if not gt_has_pixel:
+        return dice, iou, np.nan, 'empty_gt'
+    if not pred_has_pixel:
+        return dice, iou, np.nan, 'empty_pred'
+
+    try:
+        hd95 = float(metric.binary.hd95(pred, gt, voxelspacing=voxelspacing))
+    except (RuntimeError, ValueError):
+        return dice, iou, np.nan, 'calculation_error'
+    if not np.isfinite(hd95):
+        return dice, iou, np.nan, 'non_finite'
+    return dice, iou, hd95, 'valid'
+
+
 def test_single_volume(
     image,
     label,
@@ -191,6 +214,7 @@ def test_single_volume(
     case=None,
     z_spacing=1,
     valid_slice_indices=None,
+    return_prediction=False,
 ):
     image, label = image.squeeze(0).cpu().detach().numpy(), label.squeeze(0).cpu().detach().numpy()
     if image.ndim != 3 or label.ndim != 3:
@@ -272,6 +296,8 @@ def test_single_volume(
         sitk.WriteImage(img_itk, os.path.join(case_save_path, 'image.nii.gz'))
         sitk.WriteImage(lab_itk, os.path.join(case_save_path, 'ground_truth.nii.gz'))
         sitk.WriteImage(mask_itk, os.path.join(case_save_path, 'evaluation_mask.nii.gz'))
+    if return_prediction:
+        return metric_list, prediction, label, valid_slice_indices
     return metric_list
 
 def test_single_slice(image, label, net, classes, multimask_output, patch_size=[256, 256],

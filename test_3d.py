@@ -196,12 +196,12 @@ def config_to_dict(config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None, help='The config file provided by the trained model')
-    parser.add_argument('--num_classes', type=int, default=4)
+    parser.add_argument('--num_classes', type=int, default=5)
     parser.add_argument(
         '--rotation_k',
         type=int,
         choices=[0, 1, 2, 3],
-        default=3,
+        default=0,
         help='Fixed in-plane 90-degree counterclockwise rotations for in-house data',
     )
     parser.add_argument(
@@ -219,7 +219,7 @@ if __name__ == '__main__':
     parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
     parser.add_argument('--ckpt', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/checkpoints/sam_vit_b_01ec64.pth',
                         help='Pretrained checkpoint')
-    parser.add_argument('--lora_ckpt', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/Lora_checkopints/Synapse_512_pretrain_vit_b_21k_epo50_bs32_lr0.0004/best.pth', 
+    parser.add_argument('--lora_ckpt', type=str, default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/Lora_checkopints/self_dataset_ckpt/epoch_118_iter_12000.pth', 
                         help='The checkpoint from LoRA')
     parser.add_argument('--vit_name', type=str, default='vit_b', help='Select one vit model')
     parser.add_argument('--rank', type=int, default=4, help='Rank for LoRA adaptation')

@@ -127,13 +127,13 @@ def pad_to_square(img_txt, target_dir, target_size=(512, 512)):
         else:
             print(f"Warning: Image file missing at expected path -> {img_path}")
 
-#img_txt1 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/train.txt'
-#target_dir1 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/train'
+img_txt1 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/aorta_visible_samples.txt'
+target_dir1 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/PanTS_AP'
 
 #img_txt2 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/test.txt'
 #target_dir2 = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/test'
 
-#pad_to_square(img_txt1, target_dir1)
+pad_to_square(img_txt1, target_dir1)
 #pad_to_square(img_txt2, target_dir2)
 
 #test_path = '/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/Dataset_AP/positive_sample/test/image/PanTS2D_000435.npy'

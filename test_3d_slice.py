@@ -200,8 +200,8 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None)
-    parser.add_argument('--num_classes', type=int, default=4)
-    parser.add_argument('--rotation_k', type=int, choices=[0, 1, 2, 3], default=3)
+    parser.add_argument('--num_classes', type=int, default=5)
+    parser.add_argument('--rotation_k', type=int, choices=[0, 1, 2, 3], default=0)
     parser.add_argument('--low_dice_threshold', type=float, default=0.5)
     parser.add_argument(
         '--list_dir',
@@ -225,7 +225,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--lora_ckpt',
         type=str,
-        default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/Lora_checkopints/Synapse_512_pretrain_vit_b_21k_epo50_bs32_lr0.0004/best.pth',
+        default='/home/bml/storage/mnt/v-3f30eb9261b04a32/org/HY/GHY/SAMed/Lora_checkopints/self_dataset_ckpt/epoch_118_iter_12000.pth',
     )
     parser.add_argument('--vit_name', type=str, default='vit_b')
     parser.add_argument('--rank', type=int, default=4)

@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
-from utils import test_single_volume
+from utils import calculate_slice_metrics, test_single_volume
 from importlib import import_module
 from segment_anything import sam_model_registry
 from datasets.test_dataset import TestDataset
@@ -97,7 +97,9 @@ def inference(
     reference_vessel_names = ', '.join(
         class_to_name[class_id] for class_id in reference_class_ids
     )
-    metric_list = 0.0
+    case_metric_values = []
+    hd95_values = [[] for _ in range(args.num_classes)]
+    hd95_status_counts = [dict() for _ in range(args.num_classes)]
 
     valid_case_count = 0
     low_dice_samples = []
@@ -142,13 +144,36 @@ def inference(
             )
             continue
 
-        metric_i = test_single_volume(
-            image, label, model, classes=args.num_classes, multimask_output=multimask_output,
+        metric_i, prediction, volume_label, evaluated_indices = test_single_volume(
+            image,
+            label,
+            model,
+            classes=args.num_classes,
+            multimask_output=multimask_output,
             patch_size=[args.img_size, args.img_size],
-            test_save_path=test_save_path, case=case_name, z_spacing=z_spacing,
+            test_save_path=test_save_path,
+            case=case_name,
+            z_spacing=z_spacing,
             valid_slice_indices=valid_indices,
+            return_prediction=True,
         )
         tumour_dice = float(metric_i[0][0])
+
+        # Calculate 2D HD95 only on slices where both masks are non-empty.
+        for slice_index in evaluated_indices:
+            slice_prediction = prediction[int(slice_index)]
+            slice_label = volume_label[int(slice_index)]
+            for class_index in range(args.num_classes):
+                class_id = class_index + 1
+                _, _, hd95, hd95_status = calculate_slice_metrics(
+                    slice_prediction == class_id,
+                    slice_label == class_id,
+                )
+                hd95_status_counts[class_index][hd95_status] = (
+                    hd95_status_counts[class_index].get(hd95_status, 0) + 1
+                )
+                if hd95_status == 'valid':
+                    hd95_values[class_index].append(hd95)
 
         if test_save_path is not None:
             case_save_path = os.path.join(test_save_path, case_name)
@@ -199,7 +224,7 @@ def inference(
                     )
                 )
         
-        metric_list += np.array(metric_i)
+        case_metric_values.append(np.asarray(metric_i, dtype=np.float64))
         valid_case_count += 1
         
         case_mean = np.mean(metric_i, axis=0)
@@ -238,17 +263,81 @@ def inference(
         logging.error("No valid cases were evaluated!")
         return 0
 
-    # Divide by actual evaluated cases count to avoid skewing average metrics
-    metric_list = metric_list / valid_case_count
+    case_metric_array = np.asarray(case_metric_values, dtype=np.float64)
+    mean_case_dice = np.mean(case_metric_array[:, :, 0], axis=0)
+    mean_case_iou = np.mean(case_metric_array[:, :, 1], axis=0)
+    median_case_dice = np.median(case_metric_array[:, :, 0], axis=0)
+    median_case_iou = np.median(case_metric_array[:, :, 1], axis=0)
+    mean_hd95_values = []
+    median_hd95_values = []
     for i in range(1, args.num_classes + 1):
-        logging.info('Mean class %d name %s mean_dice %f mean_iou %f' % (
-            i, class_to_name[i], metric_list[i - 1][0], metric_list[i - 1][1]))
+        class_index = i - 1
+        class_hd95_values = hd95_values[class_index]
+        mean_hd95 = (
+            float(np.mean(class_hd95_values))
+            if class_hd95_values
+            else np.nan
+        )
+        median_hd95 = (
+            float(np.median(class_hd95_values))
+            if class_hd95_values
+            else np.nan
+        )
+        mean_hd95_values.append(mean_hd95)
+        median_hd95_values.append(median_hd95)
+        logging.info(
+            'Class %d name %s mean_case_dice %f mean_case_iou %f; '
+            'median_case_dice %f median_case_iou %f; '
+            'valid_slice_hd95_mean_px %f valid_slice_hd95_median_px %f; '
+            'hd95_valid_count %d; '
+            'hd95_status_counts %s',
+            i,
+            class_to_name[i],
+            mean_case_dice[class_index],
+            mean_case_iou[class_index],
+            median_case_dice[class_index],
+            median_case_iou[class_index],
+            mean_hd95,
+            median_hd95,
+            len(class_hd95_values),
+            hd95_status_counts[class_index],
+        )
 
-    performance = np.mean(metric_list, axis=0)[0]
-    mean_iou = np.mean(metric_list, axis=0)[1]
-    
-    logging.info('Testing performance in best val model: mean_dice : %f mean_iou : %f' % (
-        performance, mean_iou))
+    macro_mean_case_dice = float(np.mean(mean_case_dice))
+    macro_mean_case_iou = float(np.mean(mean_case_iou))
+    macro_median_case_dice = float(np.mean(median_case_dice))
+    macro_median_case_iou = float(np.mean(median_case_iou))
+    valid_class_mean_hd95 = [
+        value for value in mean_hd95_values if np.isfinite(value)
+    ]
+    macro_mean_valid_slice_hd95 = (
+        float(np.mean(valid_class_mean_hd95))
+        if valid_class_mean_hd95
+        else np.nan
+    )
+    valid_class_median_hd95 = [
+        value for value in median_hd95_values if np.isfinite(value)
+    ]
+    macro_mean_of_classwise_valid_slice_hd95_medians = (
+        float(np.mean(valid_class_median_hd95))
+        if valid_class_median_hd95
+        else np.nan
+    )
+    logging.info(
+        'Testing performance: macro_mean_case_dice %f; macro_mean_case_iou %f; '
+        'macro_mean_valid_slice_hd95_px %f; '
+        'macro_mean_of_classwise_case_medians_dice %f; '
+        'macro_mean_of_classwise_case_medians_iou %f; '
+        'macro_mean_of_classwise_valid_slice_hd95_medians_px %f; '
+        'evaluated_cases %d',
+        macro_mean_case_dice,
+        macro_mean_case_iou,
+        macro_mean_valid_slice_hd95,
+        macro_median_case_dice,
+        macro_median_case_iou,
+        macro_mean_of_classwise_valid_slice_hd95_medians,
+        valid_case_count,
+    )
 
     logging.info("Testing Finished!")
     return 1

@@ -23,8 +23,15 @@ from datasets.merged_dataset import (
 )
 from datasets.test_dataset import TestDataset
 
-dice_weights_list = [0.2, 3, 0.5, 1.5, 1.5]
-focal_weights_list = [0.05, 10, 0.5, 1.5, 1.5]
+PHASE_DICE_WEIGHTS = {
+    'AP': [0.2, 3, 0.5, 1.5, 1.5, 1.5],
+    'VP': [0.2, 3, 0.5, 1.5],
+}
+
+PHASE_FOCAL_WEIGHTS = {
+    'AP': [0.05, 10, 0.5, 1.5, 1.5, 1.5],
+    'VP': [0.05, 10, 0.5, 1.5],
+}
 
 
 def get_reference_class_ids(phase):
@@ -37,6 +44,26 @@ def get_reference_class_ids(phase):
     if normalized_phase not in phase_to_class_ids:
         raise ValueError(f'Unsupported phase: {phase!r}.')
     return phase_to_class_ids[normalized_phase]
+
+
+def get_loss_class_weights(phase, output_class_count):
+    """Return phase-specific loss weights matching the model output channels."""
+    normalized_phase = str(phase).upper()
+    if normalized_phase not in PHASE_DICE_WEIGHTS:
+        raise ValueError(f'Unsupported phase: {phase!r}.')
+    dice_weights = PHASE_DICE_WEIGHTS[normalized_phase]
+    focal_weights = PHASE_FOCAL_WEIGHTS[normalized_phase]
+    if len(dice_weights) != output_class_count:
+        raise ValueError(
+            f'Phase {normalized_phase} requires {len(dice_weights)} output classes, '
+            f'but received {output_class_count}.'
+        )
+    if len(focal_weights) != output_class_count:
+        raise ValueError(
+            f'Phase {normalized_phase} focal weights do not match '
+            f'{output_class_count} output classes.'
+        )
+    return dice_weights, focal_weights
 
 
 def validate_case_tumour_dice(
@@ -230,18 +257,13 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     model.train()
 
     output_class_count = num_classes + 1
-    if output_class_count > len(dice_weights_list):
-        raise ValueError(
-            f'No configured Dice weights for {output_class_count} output classes.'
-        )
-    if output_class_count > len(focal_weights_list):
-        raise ValueError(
-            f'No configured focal weights for {output_class_count} output classes.'
-        )
+    dice_weight_values, focal_class_weights = get_loss_class_weights(
+        args.phase,
+        output_class_count,
+    )
     dice_class_weights = torch.tensor(
-        dice_weights_list[:output_class_count], dtype=torch.float32
+        dice_weight_values, dtype=torch.float32
     ).cuda()
-    focal_class_weights = focal_weights_list[:output_class_count]
     logging.info(
         'Loss weights for phase %s: Dice=%s; focal=%s',
         args.phase,

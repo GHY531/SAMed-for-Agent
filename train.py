@@ -25,8 +25,6 @@ parser.add_argument(
     default='AP',
     help='Contrast-enhanced CT phase defining the label schema and vessel selection rule',
 )
-parser.add_argument('--num_classes', type=int,
-                    default=4, help='output channel of network') 
 parser.add_argument('--max_iterations', type=int,
                     default=21000, help='maximum epoch number to train')
 parser.add_argument('--max_epochs', type=int,
@@ -98,9 +96,11 @@ parser.add_argument('--dice_weight', type=float, default=0.8, help='The weight o
 parser.add_argument('--focal_weight', type=float, default=0.1, help='The weight of Focal loss')
 
 args = parser.parse_args()
-
-if args.phase == 'VP' and args.num_classes != 3:
-    parser.error('VP requires --num_classes 3 for tumour, PV, and SMV.')
+PHASE_NUM_CLASSES = {
+    'AP': 5,
+    'VP': 3,
+}
+args.num_classes = PHASE_NUM_CLASSES[args.phase]
 
 if __name__ == "__main__":
     if not args.deterministic:

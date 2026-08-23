@@ -187,6 +187,7 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
     logging.info('Saved tumour slice audit records to %s', tumour_metrics_file)
 
     global_dice_values = []
+    global_iou_values = []
     for class_index in range(args.num_classes):
         true_positive = global_true_positive[class_index]
         false_positive = global_false_positive[class_index]
@@ -194,27 +195,46 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
         denominator = 2 * true_positive + false_positive + false_negative
         # Assign a perfect score when both prediction and ground truth are empty.
         global_dice = 1.0 if denominator == 0 else 2 * true_positive / denominator
+        iou_denominator = true_positive + false_positive + false_negative
+        global_iou = 1.0 if iou_denominator == 0 else true_positive / iou_denominator
         global_dice_values.append(global_dice)
+        global_iou_values.append(global_iou)
 
         class_hd95_values = hd95_values[class_index]
         mean_hd95 = np.mean(class_hd95_values) if class_hd95_values else np.nan
         median_hd95 = np.median(class_hd95_values) if class_hd95_values else np.nan
         logging.info(
-            'Global class %d name %s dice %f; valid_slice_hd95_mean %f; '
+            'Global class %d name %s dice %f; iou %f; valid_slice_hd95_mean %f; '
             'valid_slice_hd95_median %f; hd95_valid_count %d; '
             'hd95_status_counts %s',
             class_index + 1,
             class_to_name.get(class_index + 1, f'class_{class_index + 1}'),
             global_dice,
+            global_iou,
             mean_hd95,
             median_hd95,
             len(class_hd95_values),
             hd95_status_counts[class_index],
         )
 
+    micro_true_positive = int(global_true_positive.sum())
+    micro_false_positive = int(global_false_positive.sum())
+    micro_false_negative = int(global_false_negative.sum())
+    micro_iou_denominator = (
+        micro_true_positive + micro_false_positive + micro_false_negative
+    )
+    # Compute one foreground-class IoU after aggregating every class's errors.
+    micro_iou = (
+        1.0
+        if micro_iou_denominator == 0
+        else micro_true_positive / micro_iou_denominator
+    )
     logging.info(
-        'Testing performance: mean_global_dice %f over %d valid slices',
+        'Testing performance: mean_global_dice %f; mean_global_iou %f; '
+        'micro_iou %f over %d valid slices',
         np.mean(global_dice_values),
+        np.mean(global_iou_values),
+        micro_iou,
         evaluated_slice_count,
     )
     logging.info('Testing Finished!')

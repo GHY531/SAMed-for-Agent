@@ -16,12 +16,66 @@ from segment_anything import sam_model_registry
 from datasets.test_dataset import TestDataset
 
 
-class_to_name = {0: 'background',
-                 1: 'tumour',
-                 2: 'aorta',
-                 3: 'superior mesenteric artery',
-                 4: 'celiac axis',
-                 }
+AP_CLASS_TO_NAME = {
+    0: 'background',
+    1: 'tumour',
+    2: 'aorta',
+    3: 'superior mesenteric artery (SMA)',
+    4: 'celiac axis (CA)',
+    5: 'common hepatic artery (CHA)',
+}
+
+VP_CLASS_TO_NAME = {
+    0: 'background',
+    1: 'tumour',
+    2: 'portal vein (PV)',
+    3: 'superior mesenteric vein (SMV)',
+}
+
+PHASE_CLASS_TO_NAME = {
+    'AP': AP_CLASS_TO_NAME,
+    'VP': VP_CLASS_TO_NAME,
+}
+
+PHASE_REFERENCE_CLASS_IDS = {
+    'AP': (2,),
+    'VP': (2, 3),
+}
+
+
+def get_class_to_name(phase):
+    """Return the label mapping for one contrast-enhanced CT phase."""
+    normalized_phase = str(phase).upper()
+    if normalized_phase not in PHASE_CLASS_TO_NAME:
+        raise ValueError(
+            f'phase must be one of {tuple(PHASE_CLASS_TO_NAME)}, '
+            f'but received {phase!r}.'
+        )
+    return PHASE_CLASS_TO_NAME[normalized_phase]
+
+
+def get_reference_class_ids(phase):
+    """Return vessel labels required to include a slice in phase-specific evaluation."""
+    normalized_phase = str(phase).upper()
+    get_class_to_name(normalized_phase)
+    return PHASE_REFERENCE_CLASS_IDS[normalized_phase]
+
+
+def resolve_phase_configuration(args):
+    """Normalize phase settings and verify the foreground class count."""
+    args.phase = str(args.phase).upper()
+    class_to_name = get_class_to_name(args.phase)
+    expected_num_classes = len(class_to_name) - 1
+    if args.num_classes is None:
+        args.num_classes = expected_num_classes
+    else:
+        args.num_classes = int(args.num_classes)
+        if args.num_classes != expected_num_classes:
+            raise ValueError(
+                f'phase {args.phase} requires num_classes={expected_num_classes}, '
+                f'but received {args.num_classes}.'
+            )
+    return class_to_name
 
 
 def inference(
@@ -31,10 +85,18 @@ def inference(
     model, 
     test_save_path=None
 ):
-    db_test = TestDataset(list_path=args.list_dir)
+    reference_class_ids = get_reference_class_ids(args.phase)
+    db_test = TestDataset(
+        list_path=args.list_dir,
+        required_label_ids=reference_class_ids,
+    )
     testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=1)    
     logging.info(f'{len(testloader)} test iterations per epoch')
     model.eval()
+    class_to_name = get_class_to_name(args.phase)
+    reference_vessel_names = ', '.join(
+        class_to_name[class_id] for class_id in reference_class_ids
+    )
     metric_list = 0.0
 
     valid_case_count = 0
@@ -58,17 +120,26 @@ def inference(
         # label shape: [1, N, H, W] -> label_sq shape: [N, H, W]
         label_sq = label.squeeze(0)
         
-        # Check non-zero slices and slices containing class 2 (Aorta)
+        # AP requires aorta; VP requires portal vein or superior mesenteric vein.
         has_nonzero = (label_sq != 0).flatten(1).any(dim=1)
-        has_aorta = (label_sq == 2).flatten(1).any(dim=1)
+        has_reference_vessel = torch.stack(
+            [
+                (label_sq == class_id).flatten(1).any(dim=1)
+                for class_id in reference_class_ids
+            ]
+        ).any(dim=0)
         
         # Combine conditions and extract valid slice indices
-        valid_mask = has_nonzero & has_aorta
+        valid_mask = has_nonzero & has_reference_vessel
         valid_indices = torch.where(valid_mask)[0]
 
         # Skip evaluation if no slices meet the criteria
         if len(valid_indices) == 0:
-            logging.warning(f"Case {case_name} has no valid slices (all background or missing class 2), skipped.")
+            logging.warning(
+                'Case %s has no valid slices (all background or missing %s), skipped.',
+                case_name,
+                reference_vessel_names,
+            )
             continue
 
         metric_i = test_single_volume(
@@ -196,7 +267,8 @@ def config_to_dict(config):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None, help='The config file provided by the trained model')
-    parser.add_argument('--num_classes', type=int, default=5)
+    parser.add_argument('--phase', type=str, choices=['AP', 'VP'], default='AP')
+    parser.add_argument('--num_classes', type=int, default=None)
     parser.add_argument(
         '--rotation_k',
         type=int,
@@ -232,6 +304,7 @@ if __name__ == '__main__':
         config_dict = config_to_dict(args.config)
         for key in config_dict:
             setattr(args, key, config_dict[key])
+    resolve_phase_configuration(args)
 
     if not args.deterministic:
         cudnn.benchmark = True

@@ -14,7 +14,12 @@ from tqdm import tqdm
 
 from datasets.test_dataset import TestDataset
 from segment_anything import sam_model_registry
-from test_3d import class_to_name, config_to_dict
+from test_3d import (
+    config_to_dict,
+    get_class_to_name,
+    get_reference_class_ids,
+    resolve_phase_configuration,
+)
 from utils import calculate_slice_metrics, test_single_volume
 
 
@@ -35,10 +40,18 @@ TUMOUR_SLICE_FIELDNAMES = (
 def inference(args, multimask_output, z_spacing, model, test_save_path=None):
     """Run 2D slice inference and aggregate global Dice across all valid slices."""
     # Keep the dataset construction and list-file loading identical to test_3d.py.
-    db_test = TestDataset(list_path=args.list_dir)
+    reference_class_ids = get_reference_class_ids(args.phase)
+    db_test = TestDataset(
+        list_path=args.list_dir,
+        required_label_ids=reference_class_ids,
+    )
     testloader = DataLoader(db_test, batch_size=1, shuffle=False, num_workers=1)
     logging.info('%d test iterations per epoch', len(testloader))
     model.eval()
+    class_to_name = get_class_to_name(args.phase)
+    reference_vessel_names = ', '.join(
+        class_to_name[class_id] for class_id in reference_class_ids
+    )
 
     global_true_positive = np.zeros(args.num_classes, dtype=np.int64)
     global_false_positive = np.zeros(args.num_classes, dtype=np.int64)
@@ -62,13 +75,23 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
         image = torch.rot90(image, k=rotation_k, dims=(-2, -1))
         label = torch.rot90(label, k=rotation_k, dims=(-2, -1))
 
-        # Preserve the original valid-slice selection rule from test_3d.py.
+        # Use the same phase-specific valid-slice selection rule as test_3d.py.
         label_sq = label.squeeze(0)
         has_nonzero = (label_sq != 0).flatten(1).any(dim=1)
-        has_aorta = (label_sq == 2).flatten(1).any(dim=1)
-        valid_indices = torch.where(has_nonzero & has_aorta)[0]
+        # AP requires aorta; VP requires portal vein or superior mesenteric vein.
+        has_reference_vessel = torch.stack(
+            [
+                (label_sq == class_id).flatten(1).any(dim=1)
+                for class_id in reference_class_ids
+            ]
+        ).any(dim=0)
+        valid_indices = torch.where(has_nonzero & has_reference_vessel)[0]
         if len(valid_indices) == 0:
-            logging.warning('Case %s has no valid slices and was skipped.', case_name)
+            logging.warning(
+                'Case %s has no valid slices (all background or missing %s), skipped.',
+                case_name,
+                reference_vessel_names,
+            )
             continue
 
         _, prediction, volume_label, evaluated_indices = test_single_volume(
@@ -169,6 +192,7 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
         false_positive = global_false_positive[class_index]
         false_negative = global_false_negative[class_index]
         denominator = 2 * true_positive + false_positive + false_negative
+        # Assign a perfect score when both prediction and ground truth are empty.
         global_dice = 1.0 if denominator == 0 else 2 * true_positive / denominator
         global_dice_values.append(global_dice)
 
@@ -200,7 +224,8 @@ def inference(args, multimask_output, z_spacing, model, test_save_path=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default=None)
-    parser.add_argument('--num_classes', type=int, default=5)
+    parser.add_argument('--phase', type=str, choices=['AP', 'VP'], default='AP')
+    parser.add_argument('--num_classes', type=int, default=None)
     parser.add_argument('--rotation_k', type=int, choices=[0, 1, 2, 3], default=0)
     parser.add_argument('--low_dice_threshold', type=float, default=0.5)
     parser.add_argument(
@@ -236,6 +261,7 @@ if __name__ == '__main__':
         config_dict = config_to_dict(args.config)
         for key, value in config_dict.items():
             setattr(args, key, value)
+    resolve_phase_configuration(args)
 
     cudnn.benchmark = not args.deterministic
     cudnn.deterministic = bool(args.deterministic)

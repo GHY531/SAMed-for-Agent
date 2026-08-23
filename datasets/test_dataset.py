@@ -11,9 +11,12 @@ class TestDataset(Dataset):
     """
     To test trained SAMed
     """
-    def __init__(self, list_path, transform=None):
+    def __init__(self, list_path, transform=None, required_label_ids=(2,)):
         self.transform = transform
         self.cases = []
+        self.required_label_ids = tuple(int(class_id) for class_id in required_label_ids)
+        if not self.required_label_ids:
+            raise ValueError('required_label_ids must contain at least one label ID.')
 
         with open(list_path) as f:
             patient_dirs = [line.strip() for line in f.readlines() if line.strip()]
@@ -46,7 +49,12 @@ class TestDataset(Dataset):
                     mmap_mode='r'
                 )
 
-                if np.any(label) and np.any(label == 2):
+                # Include a case only when it contains a required reference vessel.
+                has_required_label = any(
+                    np.any(label == class_id)
+                    for class_id in self.required_label_ids
+                )
+                if np.any(label) and has_required_label:
                     self.cases.append({
                         'label_path': label_path,
                         'case_name': self._build_case_name(label_path),

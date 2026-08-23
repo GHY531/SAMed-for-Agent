@@ -19,6 +19,12 @@ parser.add_argument('--output', type=str,
                     help='Trained LORA Checkpoints')
 parser.add_argument('--dataset', type=str,
                     default='Synapse', help='experiment_name')
+parser.add_argument(
+    '--phase',
+    choices=['AP', 'VP'],
+    default='AP',
+    help='Contrast-enhanced CT phase defining the label schema and vessel selection rule',
+)
 parser.add_argument('--num_classes', type=int,
                     default=4, help='output channel of network') 
 parser.add_argument('--max_iterations', type=int,
@@ -93,6 +99,9 @@ parser.add_argument('--focal_weight', type=float, default=0.1, help='The weight 
 
 args = parser.parse_args()
 
+if args.phase == 'VP' and args.num_classes != 3:
+    parser.error('VP requires --num_classes 3 for tumour, PV, and SMV.')
+
 if __name__ == "__main__":
     if not args.deterministic:
         cudnn.benchmark = True
@@ -122,6 +131,7 @@ if __name__ == "__main__":
     snapshot_path = snapshot_path + '_bs' + str(args.batch_size)
     snapshot_path = snapshot_path + '_lr' + str(args.base_lr) if args.base_lr != 0.01 else snapshot_path
     snapshot_path = snapshot_path + '_s' + str(args.seed) if args.seed != 1234 else snapshot_path
+    snapshot_path = snapshot_path + '_vp' if args.phase == 'VP' else snapshot_path
 
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)

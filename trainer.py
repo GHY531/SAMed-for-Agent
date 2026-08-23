@@ -27,12 +27,25 @@ dice_weights_list = [0.2, 3, 0.5, 1.5, 1.5]
 focal_weights_list = [0.05, 10, 0.5, 1.5, 1.5]
 
 
+def get_reference_class_ids(phase):
+    """Return the vessel labels used to select training and validation slices."""
+    normalized_phase = str(phase).upper()
+    phase_to_class_ids = {
+        'AP': (2,),
+        'VP': (2, 3),
+    }
+    if normalized_phase not in phase_to_class_ids:
+        raise ValueError(f'Unsupported phase: {phase!r}.')
+    return phase_to_class_ids[normalized_phase]
+
+
 def validate_case_tumour_dice(
     model,
     val_loader,
     multimask_output,
     patch_size,
     rotation_k,
+    reference_class_ids,
 ):
     """Return mean case-level tumour Dice on tumour-bearing evaluation subsets."""
     model.eval()
@@ -44,12 +57,17 @@ def validate_case_tumour_dice(
         label = sampled_batch['label']
         case_name = sampled_batch['case_name'][0]
         label_slices = label.squeeze(0)
-        valid_mask = (label_slices == 2).flatten(1).any(dim=1)
+        valid_mask = torch.stack(
+            [
+                (label_slices == class_id).flatten(1).any(dim=1)
+                for class_id in reference_class_ids
+            ]
+        ).any(dim=0)
         valid_indices = torch.where(valid_mask)[0]
 
         if len(valid_indices) == 0:
             logging.warning(
-                'Validation case %s has no aorta-visible slice and was skipped',
+                'Validation case %s has no required vessel-visible slice and was skipped',
                 case_name,
             )
             skipped_cases += 1
@@ -116,6 +134,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     logging.info(str(args))
     base_lr = args.base_lr
     num_classes = args.num_classes
+    reference_class_ids = get_reference_class_ids(args.phase)
     batch_size = args.batch_size * args.n_gpu
     # max_iterations = args.max_iterations
     if args.train_data_type == 'inhouse_3d':
@@ -123,6 +142,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
             list_path=args.train_list,
             rotation_k=args.rotation_k,
             num_classes=args.num_classes,
+            reference_class_ids=reference_class_ids,
             transform=transforms.Compose([
                 MergedRandomGenerator(
                     output_size=[args.img_size, args.img_size],
@@ -184,7 +204,10 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
         pin_memory=True,
         worker_init_fn=worker_init_fn,
     )
-    val_dataset = TestDataset(list_path=args.val_list)
+    val_dataset = TestDataset(
+        list_path=args.val_list,
+        required_label_ids=reference_class_ids,
+    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -195,18 +218,39 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
     if len(val_dataset) == 0:
         raise ValueError(f'No validation cases found in {args.val_list}.')
     logging.info(
-        'Validation cases: %d; list: %s; selection metric: case tumour Dice',
+        'Validation cases: %d; list: %s; phase: %s; reference classes: %s; '
+        'selection metric: case tumour Dice',
         len(val_dataset),
         args.val_list,
+        args.phase,
+        reference_class_ids,
     )
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
     model.train()
 
-    dice_class_weights = torch.tensor(dice_weights_list, dtype=torch.float32).cuda()
+    output_class_count = num_classes + 1
+    if output_class_count > len(dice_weights_list):
+        raise ValueError(
+            f'No configured Dice weights for {output_class_count} output classes.'
+        )
+    if output_class_count > len(focal_weights_list):
+        raise ValueError(
+            f'No configured focal weights for {output_class_count} output classes.'
+        )
+    dice_class_weights = torch.tensor(
+        dice_weights_list[:output_class_count], dtype=torch.float32
+    ).cuda()
+    focal_class_weights = focal_weights_list[:output_class_count]
+    logging.info(
+        'Loss weights for phase %s: Dice=%s; focal=%s',
+        args.phase,
+        dice_class_weights.tolist(),
+        focal_class_weights,
+    )
     ce_loss = CrossEntropyLoss()
-    dice_loss = WeightedDiceLoss(n_classes=num_classes + 1, weight=dice_class_weights)
-    focal_loss = Focal_loss(num_classes=num_classes + 1, alpha=focal_weights_list)
+    dice_loss = WeightedDiceLoss(n_classes=output_class_count, weight=dice_class_weights)
+    focal_loss = Focal_loss(num_classes=output_class_count, alpha=focal_class_weights)
     if args.warmup:
         b_lr = base_lr / args.warmup_period
     else:
@@ -293,6 +337,7 @@ def trainer_synapse(args, model, snapshot_path, multimask_output, low_res):
             multimask_output=multimask_output,
             patch_size=args.img_size,
             rotation_k=args.rotation_k,
+            reference_class_ids=reference_class_ids,
         )
         writer.add_scalar(
             'Validation/case_tumour_dice',

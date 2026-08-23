@@ -51,21 +51,33 @@ class RandomGenerator(object):
 
 class MergedDataset(Dataset):
     """
-    Load positive cases and index their aorta-visible 2D slices.
+    Load positive cases and index their phase-specific vessel-visible 2D slices.
 
     Tumour-present and tumour-absent refer to slices within positive cases,
     not to patient-level disease status.
     """
-    def __init__(self, list_path, transform=None, rotation_k=3, num_classes=4):
+    def __init__(
+        self,
+        list_path,
+        transform=None,
+        rotation_k=3,
+        num_classes=4,
+        reference_class_ids=(2,),
+    ):
         self.transform = transform
         self.index = []
         self.positive_indices = []
         self.negative_indices = []
         self.rotation_k = rotation_k
         self.num_classes = num_classes
+        self.reference_class_ids = tuple(
+            int(class_id) for class_id in reference_class_ids
+        )
 
         if rotation_k not in (0, 1, 2, 3):
             raise ValueError('rotation_k must be one of 0, 1, 2, or 3.')
+        if not self.reference_class_ids:
+            raise ValueError('reference_class_ids must contain at least one label ID.')
 
         with open(list_path) as f:
             patient_dirs = [line.strip() for line in f.readlines() if line.strip()]
@@ -86,8 +98,11 @@ class MergedDataset(Dataset):
                 for slice_idx in range(num_slices):
                     slice_label = label[:, :, slice_idx]
                     
-                    # Keep the anatomically defined aorta-visible slice subset.
-                    if not np.any(slice_label == 2):
+                    # Keep slices containing any required phase-specific vessel class.
+                    if not any(
+                        np.any(slice_label == class_id)
+                        for class_id in self.reference_class_ids
+                    ):
                         continue
 
                     dataset_index = len(self.index)
